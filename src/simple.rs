@@ -232,6 +232,7 @@ impl GraphicsContext {
             usage: (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_TRANSFER_SRC_BIT as u32)
                 | (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_TRANSFER_DST_BIT as u32)
                 | (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT as u32)
+                | (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_STORAGE_BUFFER_BIT as u32)
                 | (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT
                     as u32)
                 | (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT
@@ -2096,6 +2097,11 @@ impl DescriptorHeap {
                 image_views: Vec::new(),
             })
         }
+    }
+
+    /// Get the device address of the descriptor heap buffer
+    pub fn device_address(&self) -> u64 {
+        self.buffer.gpu_ptr
     }
 
     /// Add a texture to the heap and return its index
