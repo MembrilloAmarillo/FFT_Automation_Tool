@@ -287,7 +287,6 @@ fn main() -> Result<(), String> {
     let start_time = Instant::now();
     let mut last_print_time = start_time;
     let mut frame_count = 0;
-    let mut frames_rendered = 0;
 
     while !quit {
         // Handle events
@@ -357,7 +356,7 @@ fn main() -> Result<(), String> {
             framebuffer,
             extent.width,
             extent.height,
-            [0.1, 0.1, 0.1, 1.0], // dark gray clear color
+            [1.0, 0.0, 0.0, 1.0], // red clear color
         );
 
         // Bind graphics pipeline
@@ -388,12 +387,6 @@ fn main() -> Result<(), String> {
         swapchain
             .present(image_index, acquire_semaphore)
             .map_err(|e| format!("Failed to present: {}", e))?;
-
-        frames_rendered += 1;
-        if frames_rendered >= 5 {
-            println!("Rendered 5 frames, exiting.");
-            quit = true;
-        }
 
         // Print FPS every second
         frame_count += 1;
