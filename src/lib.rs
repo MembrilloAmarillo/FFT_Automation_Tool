@@ -278,8 +278,12 @@ impl VulkanDevice {
             enabled_extensions.push(b"VK_EXT_descriptor_buffer\0".as_ptr() as *const i8);
             // Enable scalar block layout for GLSL scalar layout
             enabled_extensions.push(b"VK_EXT_scalar_block_layout\0".as_ptr() as *const i8);
-            // Enable buffer reference for GLSL buffer_reference extension
-            enabled_extensions.push(b"VK_EXT_buffer_reference\0".as_ptr() as *const i8);
+            // Enable buffer reference for GLSL buffer_reference extension (optional)
+            // enabled_extensions.push(b"VK_EXT_buffer_reference\0".as_ptr() as *const i8);
+            eprintln!("Enabled device extensions:");
+            for ext in &enabled_extensions {
+                eprintln!("  {:?}", std::ffi::CStr::from_ptr(*ext)); // unsafe but we know they are zero-terminated
+            }
 
             // Scalar block layout feature
             let mut scalar_block_layout_features = crate::VkPhysicalDeviceScalarBlockLayoutFeatures {
@@ -337,6 +341,7 @@ impl VulkanDevice {
                 &mut device,
             );
             if result != crate::VkResult::VK_SUCCESS {
+                eprintln!("vkCreateDevice failed: {:?}", result);
                 return Err(format!("Failed to create logical device: {:?}", result));
             }
             eprintln!("Logical device created successfully");
