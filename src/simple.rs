@@ -1212,6 +1212,52 @@ impl PipelineLayout {
         }
     }
 
+    /// Create a pipeline layout with separate root arguments for vertex and fragment stages
+    /// Uses two 64-bit pointers: vertex root at offset 0, fragment root at offset 8
+    pub fn with_separate_root_arguments(context: &GraphicsContext) -> Result<Self> {
+        use std::ptr;
+
+        unsafe {
+            // Push constant range for two 64-bit root pointers (16 bytes total)
+            let push_constant_range = crate::VkPushConstantRange {
+                stageFlags: SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT,
+                offset: 0,
+                size: 16, // Two 64-bit pointers
+            };
+
+            let create_info = crate::VkPipelineLayoutCreateInfo {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                pNext: ptr::null(),
+                flags: 0,
+                setLayoutCount: 0,
+                pSetLayouts: ptr::null(),
+                pushConstantRangeCount: 1,
+                pPushConstantRanges: &push_constant_range,
+            };
+
+            let mut layout = std::ptr::null_mut();
+            let result = crate::vkCreatePipelineLayout(
+                context.device,
+                &create_info,
+                ptr::null(),
+                &mut layout,
+            );
+            if result != crate::VkResult::VK_SUCCESS {
+                return Err(Error::Vulkan(format!(
+                    "Failed to create pipeline layout with separate root arguments: {:?}",
+                    result
+                )));
+            }
+
+            Ok(PipelineLayout {
+                layout,
+                device: context.device,
+                set_layouts: Vec::new(),
+                push_constant_range: Some(push_constant_range),
+            })
+        }
+    }
+
     /// Create a pipeline layout with descriptor set layouts and optional push constants
     pub fn with_descriptor_set_layouts(
         context: &GraphicsContext,
@@ -1279,6 +1325,12 @@ impl PipelineLayout {
     pub fn push_constant_stage_flags(&self) -> u32 {
         self.push_constant_range
             .map(|range| range.stageFlags)
+            .unwrap_or(0)
+    }
+
+    pub fn push_constant_size(&self) -> usize {
+        self.push_constant_range
+            .map(|range| range.size as usize)
             .unwrap_or(0)
     }
 }
@@ -1997,6 +2049,36 @@ impl CommandBuffer {
                 stage_flags,
                 0,
                 data.len() as u32,
+                data.as_ptr() as *const _,
+            );
+        }
+    }
+
+    /// Push separate root pointers for vertex and fragment shaders
+    /// Layout must be created with with_separate_root_arguments (16-byte push constants)
+    pub fn push_separate_root_pointers(
+        &self,
+        layout: &PipelineLayout,
+        vertex_ptr: u64,
+        fragment_ptr: u64,
+    ) {
+        let stage_flags = layout.push_constant_stage_flags();
+        if stage_flags == 0 {
+            return; // No push constants in this layout
+        }
+
+        // Pack both pointers into 16 bytes
+        let mut data = [0u8; 16];
+        data[0..8].copy_from_slice(&vertex_ptr.to_ne_bytes());
+        data[8..16].copy_from_slice(&fragment_ptr.to_ne_bytes());
+
+        unsafe {
+            crate::vkCmdPushConstants(
+                self.buffer,
+                layout.vk_layout(),
+                stage_flags,
+                0,
+                16,
                 data.as_ptr() as *const _,
             );
         }
