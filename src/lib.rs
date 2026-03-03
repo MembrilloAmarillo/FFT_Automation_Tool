@@ -13,14 +13,13 @@ pub use raw::*;
 // Validation layers
 const ENABLE_VALIDATION_LAYERS: bool = cfg!(debug_assertions);
 
-unsafe extern "system" fn debug_callback(
+unsafe extern "C" fn debug_callback(
     message_severity: crate::VkDebugUtilsMessageSeverityFlagBitsEXT,
     message_type: crate::VkDebugUtilsMessageTypeFlagsEXT,
     p_callback_data: *const crate::VkDebugUtilsMessengerCallbackDataEXT,
     _p_user_data: *mut std::ffi::c_void,
 ) -> crate::VkBool32 {
     use crate::VkDebugUtilsMessageSeverityFlagBitsEXT as Severity;
-    use crate::VkDebugUtilsMessageTypeFlagBitsEXT as Type;
     let severity = match message_severity {
         Severity::VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT => "VERBOSE",
         Severity::VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT => "INFO",
@@ -28,12 +27,33 @@ unsafe extern "system" fn debug_callback(
         Severity::VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT => "ERROR",
         _ => "UNKNOWN",
     };
-    let type_str = match message_type {
-        Type::VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT => "GENERAL",
-        Type::VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT => "VALIDATION",
-        Type::VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT => "PERFORMANCE",
-        _ => "UNKNOWN",
-    };
+    let mut type_str = String::new();
+    if message_type
+        & crate::VkDebugUtilsMessageTypeFlagBitsEXT::VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT
+            as u32
+        != 0
+    {
+        type_str.push_str("GENERAL|");
+    }
+    if message_type
+        & crate::VkDebugUtilsMessageTypeFlagBitsEXT::VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT
+            as u32
+        != 0
+    {
+        type_str.push_str("VALIDATION|");
+    }
+    if message_type
+        & crate::VkDebugUtilsMessageTypeFlagBitsEXT::VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT
+            as u32
+        != 0
+    {
+        type_str.push_str("PERFORMANCE|");
+    }
+    if type_str.is_empty() {
+        type_str = format!("UNKNOWN({})", message_type);
+    } else {
+        type_str.pop(); // remove trailing '|'
+    }
     let callback_data = &*p_callback_data;
     let message = std::ffi::CStr::from_ptr(callback_data.pMessage);
     eprintln!("[{} {}] {}", severity, type_str, message.to_string_lossy());
@@ -62,6 +82,7 @@ impl SdlContext {
                 return Err(format!("SDL_Init failed: {}", get_sdl_error()));
             }
         }
+        Ok(SdlContext { _private: () })
     }
 }
 
@@ -156,11 +177,66 @@ impl VulkanInstance {
     }
 }
 
+impl VulkanInstance {
+    fn setup_debug_messenger(
+        instance: crate::VkInstance,
+    ) -> Option<crate::VkDebugUtilsMessengerEXT> {
+        unsafe {
+            // Load function pointer
+            let create_fn_ptr = crate::vkGetInstanceProcAddr(
+                instance,
+                b"vkCreateDebugUtilsMessengerEXT\0".as_ptr() as *const i8,
+            );
+            if create_fn_ptr.is_none() {
+                eprintln!("Failed to get vkCreateDebugUtilsMessengerEXT function pointer");
+                return None;
+            }
+            let create_fn: crate::PFN_vkCreateDebugUtilsMessengerEXT =
+                std::mem::transmute(create_fn_ptr);
+            let create_fn = create_fn.expect("vkCreateDebugUtilsMessengerEXT is null");
+
+            let create_info = crate::VkDebugUtilsMessengerCreateInfoEXT {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+                pNext: std::ptr::null(),
+                flags: 0,
+                messageSeverity: crate::VkDebugUtilsMessageSeverityFlagBitsEXT::VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT as u32
+                    | crate::VkDebugUtilsMessageSeverityFlagBitsEXT::VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT as u32
+                    | crate::VkDebugUtilsMessageSeverityFlagBitsEXT::VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT as u32
+                    | crate::VkDebugUtilsMessageSeverityFlagBitsEXT::VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT as u32,
+                messageType: crate::VkDebugUtilsMessageTypeFlagBitsEXT::VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT as u32
+                    | crate::VkDebugUtilsMessageTypeFlagBitsEXT::VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT as u32
+                    | crate::VkDebugUtilsMessageTypeFlagBitsEXT::VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT as u32,
+                pfnUserCallback: Some(debug_callback),
+                pUserData: std::ptr::null_mut(),
+            };
+            let mut messenger = std::ptr::null_mut();
+            let result = create_fn(instance, &create_info, std::ptr::null(), &mut messenger);
+            if result == crate::VkResult::VK_SUCCESS {
+                Some(messenger)
+            } else {
+                eprintln!("Failed to create debug messenger: {:?}", result);
+                None
+            }
+        }
+    }
+}
+
 impl Drop for VulkanInstance {
     fn drop(&mut self) {
         unsafe {
             if let Some(messenger) = self.debug_messenger {
-                crate::vkDestroyDebugUtilsMessengerEXT(self.instance, messenger, std::ptr::null());
+                let destroy_fn_ptr = crate::vkGetInstanceProcAddr(
+                    self.instance,
+                    b"vkDestroyDebugUtilsMessengerEXT\0".as_ptr() as *const i8,
+                );
+                if destroy_fn_ptr.is_none() {
+                    eprintln!("Failed to get vkDestroyDebugUtilsMessengerEXT function pointer");
+                } else {
+                    let destroy_fn: crate::PFN_vkDestroyDebugUtilsMessengerEXT =
+                        std::mem::transmute(destroy_fn_ptr);
+                    let destroy_fn = destroy_fn.expect("vkDestroyDebugUtilsMessengerEXT is null");
+                    destroy_fn(self.instance, messenger, std::ptr::null());
+                }
             }
             vkDestroyInstance(self.instance, std::ptr::null());
         }
