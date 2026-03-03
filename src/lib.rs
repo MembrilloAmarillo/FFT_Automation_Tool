@@ -152,6 +152,7 @@ impl VulkanDevice {
         instance: VulkanInstance,
         surface: Option<VulkanSurface>,
     ) -> Result<Self, String> {
+        eprintln!("VulkanDevice::create enter");
         unsafe {
             // Enumerate physical devices
             let mut device_count = 0;
@@ -166,6 +167,7 @@ impl VulkanDevice {
                     result
                 ));
             }
+            eprintln!("Found {} physical devices", device_count);
 
             let mut physical_devices = Vec::with_capacity(device_count as usize);
             let result = crate::vkEnumeratePhysicalDevices(
@@ -183,6 +185,7 @@ impl VulkanDevice {
                 .into_iter()
                 .next()
                 .ok_or("No Vulkan physical devices found".to_string())?;
+            eprintln!("Selected physical device");
 
             // Get queue family properties
             let mut queue_family_count = 0;
@@ -207,6 +210,10 @@ impl VulkanDevice {
                 })
                 .ok_or("No graphics queue family found".to_string())?
                 as u32;
+            eprintln!(
+                "Graphics queue family index: {}",
+                graphics_queue_family_index
+            );
 
             // Find present queue family index (if surface exists)
             let present_queue_family_index = if let Some(ref surf) = surface {
@@ -231,8 +238,10 @@ impl VulkanDevice {
             } else {
                 graphics_queue_family_index // same as graphics if no surface
             };
+            eprintln!("Present queue family index: {}", present_queue_family_index);
 
             // Create logical device
+            eprintln!("Creating logical device...");
             let queue_priorities = [1.0f32];
             let mut queue_create_infos = Vec::new();
 
@@ -319,6 +328,7 @@ impl VulkanDevice {
                 pEnabledFeatures: std::ptr::null(),
             };
 
+            eprintln!("Calling vkCreateDevice...");
             let mut device = std::ptr::null_mut();
             let result = crate::vkCreateDevice(
                 physical_device,
@@ -329,6 +339,7 @@ impl VulkanDevice {
             if result != crate::VkResult::VK_SUCCESS {
                 return Err(format!("Failed to create logical device: {:?}", result));
             }
+            eprintln!("Logical device created successfully");
 
             // Get queues
             let mut graphics_queue = std::ptr::null_mut();
