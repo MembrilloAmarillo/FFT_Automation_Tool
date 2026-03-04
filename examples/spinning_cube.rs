@@ -4,7 +4,7 @@
 
 use rust_and_vulkan::simple::CommandBuffer;
 use rust_and_vulkan::simple::Swapchain;
-use rust_and_vulkan::simple::{GpuBumpAllocator, GraphicsPipeline, PipelineLayout, ShaderModule};
+use rust_and_vulkan::simple::{GraphicsPipeline, PipelineLayout, ShaderModule};
 use rust_and_vulkan::{SdlContext, SdlWindow, VulkanDevice, VulkanInstance, VulkanSurface};
 use std::f32::consts::PI;
 use std::time::Instant;
@@ -221,7 +221,7 @@ fn main() -> Result<(), String> {
         .map_err(|e| format!("Failed to create fragment shader: {}", e))?;
     println!("Shader modules created.");
 
-    // Create pipeline layout with push constants for root pointer (graphics stages)
+    // Create pipeline layout with push constants for MVP matrix (graphics stages)
     println!("Creating pipeline layout...");
     let layout = PipelineLayout::with_root_argument(
         &context,
@@ -251,26 +251,6 @@ fn main() -> Result<(), String> {
     )
     .map_err(|e| format!("Failed to create graphics pipeline: {}", e))?;
     println!("Graphics pipeline created.");
-
-    // Allocate root data (MVP matrix)
-    println!("Allocating root data...");
-    let mut bump_alloc = GpuBumpAllocator::new(&context, 1024 * 1024)
-        .map_err(|e| format!("Failed to create bump allocator: {}", e))?;
-
-    #[repr(C, align(16))]
-    struct Uniforms {
-        mvp: Mat4,
-    }
-
-    let (cpu_ptr, gpu_ptr) = bump_alloc
-        .allocate::<Uniforms>(1)
-        .map_err(|e| format!("Failed to allocate root data: {}", e))?;
-    println!("Root data allocated at GPU address: 0x{:x}", gpu_ptr);
-
-    // Initialize with identity matrix
-    unsafe {
-        (*cpu_ptr).mvp = Mat4::identity();
-    }
 
     // Allocate command buffer
     println!("Allocating command buffer...");
@@ -334,10 +314,17 @@ fn main() -> Result<(), String> {
         // MVP = projection * view * model
         let mvp = projection.mul(&view).mul(&model);
 
-        unsafe {
-            (*cpu_ptr).mvp = mvp;
+        // Prepare MVP matrix bytes for push constants
+        // Convert matrix to a flat array of f32 for push constants
+        let mut mvp_bytes = [0u8; 64]; // mat4 = 4x4 f32 = 64 bytes
+        for i in 0..4 {
+            for j in 0..4 {
+                let f = mvp.data[i][j];
+                let bytes = f.to_ne_bytes();
+                let offset = (i * 4 + j) * 4;
+                mvp_bytes[offset..offset + 4].copy_from_slice(&bytes);
+            }
         }
-        println!("MVP matrix updated, gpu_ptr=0x{:x}", gpu_ptr);
 
         // Acquire next image
         let image_index = swapchain
@@ -362,8 +349,8 @@ fn main() -> Result<(), String> {
         // Bind graphics pipeline
         cmd.bind_pipeline(&pipeline);
 
-        // Set root pointer via push constants
-        cmd.push_constants(&layout, &gpu_ptr.to_ne_bytes());
+        // Set MVP matrix via push constants (64 bytes = mat4)
+        cmd.push_constants(&layout, &mvp_bytes);
 
         // Draw cube (36 vertices = 12 triangles * 3 vertices)
         cmd.draw(36, 1, 0, 0);

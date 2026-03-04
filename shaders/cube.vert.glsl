@@ -1,17 +1,8 @@
 #version 450
-#extension GL_EXT_buffer_reference : require
-#extension GL_EXT_scalar_block_layout : require
 
-struct Uniforms {
-    mat4 mvp;
-};
-
-layout(buffer_reference, scalar) buffer UniformsBlock {
-    Uniforms uniforms;
-};
-
+// Push constants with MVP matrix directly (64 bytes)
 layout(push_constant) uniform PushConstants {
-    UniformsBlock ptr;
+    mat4 mvp;
 } push;
 
 layout(location = 0) out vec3 v_color;
@@ -60,5 +51,5 @@ void main() {
     vec3 position = positions[vertex_index];
     v_color = colors[vertex_index];
     
-    gl_Position = push.ptr.uniforms.mvp * vec4(position, 1.0);
+    gl_Position = push.mvp * vec4(position, 1.0);
 }
