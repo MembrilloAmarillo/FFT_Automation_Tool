@@ -646,7 +646,6 @@ impl Fence {
                     "Failed to get fence status: {:?}",
                     result
                 ))),
-            }
         }
     }
 }
@@ -2483,13 +2482,19 @@ impl CommandBuffer {
         self.bind_compute_pipeline(pipeline);
         // Pass 64-bit pointer as two 32-bit integers
         let data = [
-            root_ptr as u32,         // low 32 bits
-            (root_ptr >> 32) as u32, // high 32 bits
+            root_ptr as u32,        // low 32 bits
+            (root_ptr >> 32) as u32 // high 32 bits
         ];
-        self.push_constants(layout, &data);
+        self.push_constants(layout, unsafe {
+            std::slice::from_raw_parts(
+                data.as_ptr() as *const u8,
+                std::mem::size_of_val(&data)
+            )
+        });
         unsafe {
             crate::vkCmdDispatch(self.buffer, group_count[0], group_count[1], group_count[2]);
         }
+    }
     }
 
     /// Draw triangles
@@ -2538,11 +2543,17 @@ impl CommandBuffer {
         if layout.push_constant_size() >= 8 {
             let addr = root_args.gpu_address();
             let data = [
-                addr as u32,         // low 32 bits
-                (addr >> 32) as u32, // high 32 bits
+                addr as u32,        // low 32 bits
+                (addr >> 32) as u32 // high 32 bits
             ];
-            self.push_constants(layout, &data);
+            self.push_constants(layout, unsafe {
+                std::slice::from_raw_parts(
+                    data.as_ptr() as *const u8,
+                    std::mem::size_of_val(&data)
+                )
+            });
         }
+    }
     }
 
     /// Set root arguments for graphics pipeline
@@ -2551,11 +2562,17 @@ impl CommandBuffer {
         if layout.push_constant_size() >= 8 {
             let addr = root_args.gpu_address();
             let data = [
-                addr as u32,         // low 32 bits
-                (addr >> 32) as u32, // high 32 bits
+                addr as u32,        // low 32 bits
+                (addr >> 32) as u32 // high 32 bits
             ];
-            self.push_constants(layout, &data);
+            self.push_constants(layout, unsafe {
+                std::slice::from_raw_parts(
+                    data.as_ptr() as *const u8,
+                    std::mem::size_of_val(&data)
+                )
+            });
         }
+    }
     }
 
     /// Get the Vulkan command buffer handle
