@@ -2,8 +2,7 @@
 //! Shows creation of shaders, pipeline, command buffers, and rendering setup.
 
 use rust_and_vulkan::simple::{
-    Buffer, BufferUsage, CommandBuffer, Format, MemoryType, PipelineLayout, ShaderModule, Texture,
-    TextureUsage,
+    Buffer, CommandBuffer, Format, IndexType, PipelineLayout, ShaderModule, Texture, TextureUsage,
 };
 use rust_and_vulkan::{SdlContext, SdlWindow, VulkanDevice, VulkanInstance, VulkanSurface};
 
@@ -28,17 +27,38 @@ fn main() -> Result<(), String> {
         .map_err(|e| format!("Failed to create graphics context: {}", e))?;
 
     println!("Graphics context created successfully.");
+    println!("UMA detected: {}", context.is_unified_memory());
 
     // Test 1: Buffer creation
     println!("1. Testing buffer creation...");
-    let vertex_buffer = Buffer::new(
-        &context,
-        1024,
-        BufferUsage::VERTEX | BufferUsage::TRANSFER_DST,
-        MemoryType::CpuMapped,
-    )
-    .map_err(|e| format!("Failed to create vertex buffer: {}", e))?;
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Vertex {
+        pos: [f32; 3],
+        color: [f32; 3],
+    }
+    let vertices = [
+        Vertex {
+            pos: [0.0, -0.5, 0.0],
+            color: [1.0, 0.0, 0.0],
+        },
+        Vertex {
+            pos: [0.5, 0.5, 0.0],
+            color: [0.0, 1.0, 0.0],
+        },
+        Vertex {
+            pos: [-0.5, 0.5, 0.0],
+            color: [0.0, 0.0, 1.0],
+        },
+    ];
+    let indices: [u32; 3] = [0, 1, 2];
+
+    let vertex_buffer = Buffer::vertex_buffer(&context, &vertices)
+        .map_err(|e| format!("Failed to create vertex buffer: {}", e))?;
+    let index_buffer = Buffer::index_buffer_u32(&context, &indices)
+        .map_err(|e| format!("Failed to create index buffer: {}", e))?;
     println!("   Vertex buffer created ({} bytes).", vertex_buffer.size());
+    println!("   Index buffer created ({} bytes).", index_buffer.size());
 
     // Test 2: Texture creation
     println!("2. Testing texture creation...");
@@ -82,6 +102,20 @@ fn main() -> Result<(), String> {
     let _command_buffer = CommandBuffer::allocate(&context)
         .map_err(|e| format!("Failed to allocate command buffer: {}", e))?;
     println!("   Command buffer allocated.");
+
+    // Test 6a: Indexed draw API commands
+    let recording_cb = CommandBuffer::allocate(&context)
+        .map_err(|e| format!("Failed to allocate command buffer for indexed test: {}", e))?;
+    recording_cb
+        .begin()
+        .map_err(|e| format!("Failed to begin command buffer: {}", e))?;
+    recording_cb.bind_vertex_buffer(0, &vertex_buffer, 0);
+    recording_cb.bind_index_buffer(&index_buffer, 0, IndexType::U32);
+    recording_cb.draw_indexed(indices.len() as u32, 1, 0, 0, 0);
+    recording_cb
+        .end()
+        .map_err(|e| format!("Failed to end command buffer: {}", e))?;
+    println!("   Indexed draw commands recorded successfully.");
 
     // Test 6: Command buffer recording (simulated)
     println!("6. Testing command buffer recording...");
