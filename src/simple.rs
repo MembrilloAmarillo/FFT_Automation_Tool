@@ -2481,7 +2481,12 @@ impl CommandBuffer {
         group_count: [u32; 3],
     ) {
         self.bind_compute_pipeline(pipeline);
-        self.push_constants(layout, &root_ptr.to_ne_bytes());
+        // Pass 64-bit pointer as two 32-bit integers
+        let data = [
+            root_ptr as u32,         // low 32 bits
+            (root_ptr >> 32) as u32, // high 32 bits
+        ];
+        self.push_constants(layout, &data);
         unsafe {
             crate::vkCmdDispatch(self.buffer, group_count[0], group_count[1], group_count[2]);
         }
@@ -2528,16 +2533,28 @@ impl CommandBuffer {
     }
 
     /// Set root arguments for compute shader
+    /// Passes 64-bit pointer as two 32-bit integers (lo, hi)
     pub fn set_compute_root_arguments(&self, layout: &PipelineLayout, root_args: &RootArguments) {
         if layout.push_constant_size() >= 8 {
-            self.push_constants(layout, &root_args.gpu_address().to_ne_bytes());
+            let addr = root_args.gpu_address();
+            let data = [
+                addr as u32,         // low 32 bits
+                (addr >> 32) as u32, // high 32 bits
+            ];
+            self.push_constants(layout, &data);
         }
     }
 
     /// Set root arguments for graphics pipeline
+    /// Passes 64-bit pointer as two 32-bit integers (lo, hi)
     pub fn set_graphics_root_arguments(&self, layout: &PipelineLayout, root_args: &RootArguments) {
         if layout.push_constant_size() >= 8 {
-            self.push_constants(layout, &root_args.gpu_address().to_ne_bytes());
+            let addr = root_args.gpu_address();
+            let data = [
+                addr as u32,         // low 32 bits
+                (addr >> 32) as u32, // high 32 bits
+            ];
+            self.push_constants(layout, &data);
         }
     }
 
