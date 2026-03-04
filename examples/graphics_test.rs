@@ -4,7 +4,7 @@
 
 use rust_and_vulkan::simple::CommandBuffer;
 use rust_and_vulkan::simple::Swapchain;
-use rust_and_vulkan::simple::{GpuBumpAllocator, GraphicsPipeline, PipelineLayout, ShaderModule};
+use rust_and_vulkan::simple::{GraphicsPipeline, PipelineLayout, ShaderModule};
 use rust_and_vulkan::{SdlContext, SdlWindow, VulkanDevice, VulkanInstance, VulkanSurface};
 use std::time::Instant;
 
@@ -112,26 +112,6 @@ fn main() -> Result<(), String> {
     .map_err(|e| format!("Failed to create graphics pipeline: {}", e))?;
     println!("Graphics pipeline created.");
 
-    // Allocate root data (color)
-    println!("Allocating root data...");
-    let mut bump_alloc = GpuBumpAllocator::new(&context, 1024 * 1024)
-        .map_err(|e| format!("Failed to create bump allocator: {}", e))?;
-
-    #[repr(C, align(16))]
-    struct RootData {
-        color: [f32; 4],
-    }
-
-    let (cpu_ptr, gpu_ptr) = bump_alloc
-        .allocate::<RootData>(1)
-        .map_err(|e| format!("Failed to allocate root data: {}", e))?;
-    println!("Root data allocated at GPU address: 0x{:x}", gpu_ptr);
-
-    // Initialize color (red)
-    unsafe {
-        (*cpu_ptr).color = [1.0, 0.0, 0.0, 1.0];
-    }
-
     // Allocate command buffer
     println!("Allocating command buffer...");
     let cmd = CommandBuffer::allocate(&context)
@@ -172,8 +152,11 @@ fn main() -> Result<(), String> {
         let hue = (elapsed.as_secs_f32() * 60.0) % 360.0; // Complete color cycle every 6 seconds
         let color = hsv_to_rgb(hue, 1.0, 1.0);
 
-        unsafe {
-            (*cpu_ptr).color = color;
+        // Convert color to bytes for push constants (4 x f32 = 16 bytes)
+        let mut color_bytes = [0u8; 16];
+        for i in 0..4 {
+            let bytes = color[i].to_ne_bytes();
+            color_bytes[i * 4..(i + 1) * 4].copy_from_slice(&bytes);
         }
 
         // Acquire next image
@@ -199,8 +182,8 @@ fn main() -> Result<(), String> {
         // Bind graphics pipeline
         cmd.bind_pipeline(&pipeline);
 
-        // Set root pointer via push constants
-        cmd.push_constants(&layout, &gpu_ptr.to_ne_bytes());
+        // Set color via push constants (vec4 = 16 bytes)
+        cmd.push_constants(&layout, &color_bytes);
 
         // Draw triangle (3 vertices, no vertex buffer)
         cmd.draw(3, 1, 0, 0);
