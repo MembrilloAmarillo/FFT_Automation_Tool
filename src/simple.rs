@@ -1419,6 +1419,164 @@ impl Drop for DescriptorSetLayout {
     }
 }
 
+/// Texture descriptor heap for bindless texturing
+/// Manages an array of 256-bit texture descriptors in GPU memory
+pub struct TextureDescriptorHeap {
+    allocation: GpuAllocation,
+    descriptor_size: usize,
+    capacity: usize,
+    used: usize,
+}
+
+impl TextureDescriptorHeap {
+    /// Create a new texture descriptor heap with specified capacity
+    pub fn new(context: &GraphicsContext, capacity: usize) -> Result<Self> {
+        // Get descriptor buffer properties
+        let mut properties = crate::VkPhysicalDeviceDescriptorBufferPropertiesEXT {
+            sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT,
+            pNext: std::ptr::null_mut(),
+            ..unsafe { std::mem::zeroed() }
+        };
+
+        unsafe {
+            let mut props2 = crate::VkPhysicalDeviceProperties2 {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+                pNext: &mut properties as *mut _ as *mut std::ffi::c_void,
+                properties: std::mem::zeroed(),
+            };
+            crate::vkGetPhysicalDeviceProperties2(context._physical_device, &mut props2);
+        }
+
+        let descriptor_size = properties.combinedImageSamplerDescriptorSize as usize;
+
+        // Allocate GPU memory for descriptors
+        let size = capacity * descriptor_size;
+        let allocation = context.gpu_malloc(size, descriptor_size, MemoryType::CpuMapped)?;
+
+        Ok(TextureDescriptorHeap {
+            allocation,
+            descriptor_size,
+            capacity,
+            used: 0,
+        })
+    }
+
+    /// Allocate space for a texture descriptor and return its index
+    pub fn allocate(&mut self) -> Result<u32> {
+        if self.used >= self.capacity {
+            return Err(Error::OutOfMemory);
+        }
+        let index = self.used as u32;
+        self.used += 1;
+        Ok(index)
+    }
+
+    /// Write a texture descriptor at the specified index
+    pub fn write_descriptor(&self, context: &GraphicsContext, index: u32, texture: &Texture, sampler: crate::VkSampler) -> Result<()> {
+        if index as usize >= self.used {
+            return Err(Error::InvalidArgument);
+        }
+        
+        // Calculate offset in the allocation
+        let offset = index as usize * self.descriptor_size;
+        
+        // Get descriptor buffer info
+        let mut info = crate::VkDescriptorGetInfoEXT {
+            sType: crate::VkStructureType::VK_STRUCTURE_TYPE_DESCRIPTOR_GET_INFO_EXT,
+            pNext: std::ptr::null(),
+            type_: crate::VkDescriptorType::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            ..unsafe { std::mem::zeroed() }
+        };
+        
+        unsafe {
+            // Set up image info
+            let mut image_info = crate::VkDescriptorImageInfo {
+                sampler,
+                imageView: std::ptr::null_mut(), // Will be set by driver
+                imageLayout: crate::VkImageLayout::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            };
+            
+            // TODO: Need to create image view for the texture
+            // For now, we'll use a placeholder
+            
+            info.data.pImageInfo = &image_info;
+            
+            // Get descriptor size
+            let mut descriptor_size = 0;
+            crate::vkGetDescriptorEXT(
+                context.device,
+                &info,
+                self.descriptor_size,
+                self.allocation.cpu_ptr.add(offset) as *mut std::ffi::c_void,
+            );
+        }
+        
+        Ok(())
+    }
+
+        // Calculate offset in the allocation
+        let offset = index as usize * self.descriptor_size;
+
+        // Get descriptor buffer info
+        let mut info = crate::VkDescriptorGetInfoEXT {
+            sType: crate::VkStructureType::VK_STRUCTURE_TYPE_DESCRIPTOR_GET_INFO_EXT,
+            pNext: std::ptr::null(),
+            type_: crate::VkDescriptorType::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            ..unsafe { std::mem::zeroed() }
+        };
+
+        unsafe {
+            // Set up image info
+            let mut image_info = crate::VkDescriptorImageInfo {
+                sampler,
+                imageView: std::ptr::null_mut(), // Will be set by driver
+                imageLayout: crate::VkImageLayout::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            };
+
+            // TODO: Need to create image view for the texture
+            // For now, we'll use a placeholder
+
+            info.data.pImageInfo = &image_info;
+
+            // Get descriptor size
+            let mut descriptor_size = 0;
+            crate::vkGetDescriptorEXT(
+                context.device,
+                &info,
+                self.descriptor_size,
+                self.allocation.cpu_ptr.add(offset) as *mut std::ffi::c_void,
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Get GPU address of the descriptor heap
+    pub fn gpu_address(&self) -> u64 {
+        self.allocation.gpu_ptr
+    }
+
+    /// Get CPU pointer to descriptor heap memory
+    pub fn cpu_ptr(&self) -> *mut u8 {
+        self.allocation.cpu_ptr
+    }
+
+    /// Get descriptor size in bytes
+    pub fn descriptor_size(&self) -> usize {
+        self.descriptor_size
+    }
+
+    /// Get capacity (maximum number of descriptors)
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Get number of used descriptors
+    pub fn used(&self) -> usize {
+        self.used
+    }
+}
+
 /// A graphics pipeline for rendering
 pub struct GraphicsPipeline {
     pipeline: crate::VkPipeline,
