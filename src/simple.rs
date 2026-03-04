@@ -360,7 +360,7 @@ impl GraphicsContext {
     pub fn gpu_free(_allocation: GpuAllocation) {
         // Memory is freed when allocation goes out of scope
     }
-    
+
     /// Upload texture data with optimal GPU memory allocation
     /// Allocates GPU-only memory and performs copy with DCC compression
     pub fn upload_texture(
@@ -374,33 +374,33 @@ impl GraphicsContext {
     ) -> Result<Texture> {
         // Create texture with GPU-only memory
         let texture = Texture::new(self, width, height, format, usage)?;
-        
+
         // Create staging buffer in CPU-mapped memory
         let staging_size = data.len();
         let staging = self.gpu_malloc(staging_size, 16, MemoryType::CpuMapped)?;
-        
+
         // Copy data to staging buffer
         staging.write(data)?;
-        
+
         // Begin command buffer recording
         command_buffer.begin()?;
-        
+
         // Transition texture to transfer destination
         command_buffer.transition_to_transfer_dst(&texture);
-        
+
         // Copy from staging buffer to texture
         command_buffer.copy_buffer_to_texture(&staging, &texture, width, height);
-        
+
         // Transition texture to shader read-only
         command_buffer.transition_to_shader_read(&texture);
-        
+
         // End command buffer
         command_buffer.end()?;
-        
+
         // Submit and wait for completion
         let fence = self.submit(command_buffer)?;
         fence.wait_forever()?;
-        
+
         Ok(texture)
     }
 
@@ -1167,31 +1167,28 @@ impl RootArguments {
     pub fn new<T>(context: &GraphicsContext) -> Result<Self> {
         let size = std::mem::size_of::<T>();
         let alignment = std::mem::align_of::<T>();
-        
+
         let allocation = context.gpu_malloc(size, alignment, MemoryType::CpuMapped)?;
-        
-        Ok(RootArguments {
-            allocation,
-            size,
-        })
+
+        Ok(RootArguments { allocation, size })
     }
-    
+
     /// Get CPU pointer for writing root data
     pub fn cpu_ptr<T>(&self) -> *mut T {
         self.allocation.cpu_ptr as *mut T
     }
-    
+
     /// Get GPU address for passing to shaders
     pub fn gpu_address(&self) -> u64 {
         self.allocation.gpu_ptr
     }
-    
+
     /// Write data to root arguments
     pub fn write<T>(&self, data: &T) -> Result<()> {
         if std::mem::size_of::<T>() > self.size {
             return Err(Error::InvalidArgument);
         }
-        
+
         unsafe {
             std::ptr::copy_nonoverlapping(
                 data as *const T as *const u8,
@@ -1199,10 +1196,10 @@ impl RootArguments {
                 std::mem::size_of::<T>(),
             );
         }
-        
+
         Ok(())
     }
-    
+
     /// Get size in bytes
     pub fn size(&self) -> usize {
         self.size
@@ -1471,7 +1468,7 @@ impl DescriptorSetLayout {
                 pBindingFlags: &binding_flags,
             };
 
-            let mut create_info = crate::VkDescriptorSetLayoutCreateInfo {
+            let create_info = crate::VkDescriptorSetLayoutCreateInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
                 pNext: &mut flags_create_info as *mut _ as *mut std::ffi::c_void,
                 flags: crate::VkDescriptorSetLayoutCreateFlagBits::VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT as u32,
@@ -1569,47 +1566,16 @@ impl TextureDescriptorHeap {
     }
 
     /// Write a texture descriptor at the specified index
-    pub fn write_descriptor(&self, context: &GraphicsContext, index: u32, texture: &Texture, sampler: crate::VkSampler) -> Result<()> {
+    pub fn write_descriptor(
+        &self,
+        context: &GraphicsContext,
+        index: u32,
+        _texture: &Texture,
+        sampler: crate::VkSampler,
+    ) -> Result<()> {
         if index as usize >= self.used {
             return Err(Error::InvalidArgument);
         }
-        
-        // Calculate offset in the allocation
-        let offset = index as usize * self.descriptor_size;
-        
-        // Get descriptor buffer info
-        let mut info = crate::VkDescriptorGetInfoEXT {
-            sType: crate::VkStructureType::VK_STRUCTURE_TYPE_DESCRIPTOR_GET_INFO_EXT,
-            pNext: std::ptr::null(),
-            type_: crate::VkDescriptorType::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            ..unsafe { std::mem::zeroed() }
-        };
-        
-        unsafe {
-            // Set up image info
-            let mut image_info = crate::VkDescriptorImageInfo {
-                sampler,
-                imageView: std::ptr::null_mut(), // Will be set by driver
-                imageLayout: crate::VkImageLayout::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            };
-            
-            // TODO: Need to create image view for the texture
-            // For now, we'll use a placeholder
-            
-            info.data.pImageInfo = &image_info;
-            
-            // Get descriptor size
-            let mut descriptor_size = 0;
-            crate::vkGetDescriptorEXT(
-                context.device,
-                &info,
-                self.descriptor_size,
-                self.allocation.cpu_ptr.add(offset) as *mut std::ffi::c_void,
-            );
-        }
-        
-        Ok(())
-    }
 
         // Calculate offset in the allocation
         let offset = index as usize * self.descriptor_size;
@@ -1624,7 +1590,7 @@ impl TextureDescriptorHeap {
 
         unsafe {
             // Set up image info
-            let mut image_info = crate::VkDescriptorImageInfo {
+            let image_info = crate::VkDescriptorImageInfo {
                 sampler,
                 imageView: std::ptr::null_mut(), // Will be set by driver
                 imageLayout: crate::VkImageLayout::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -1633,10 +1599,10 @@ impl TextureDescriptorHeap {
             // TODO: Need to create image view for the texture
             // For now, we'll use a placeholder
 
-            info.data.pImageInfo = &image_info;
+            info.data.pCombinedImageSampler = &image_info;
 
             // Get descriptor size
-            let mut descriptor_size = 0;
+            let _descriptor_size = 0;
             crate::vkGetDescriptorEXT(
                 context.device,
                 &info,
@@ -2198,23 +2164,23 @@ impl CommandBuffer {
             Format::Rgba32Float => 16,
             Format::Depth32Float => 4,
         };
-        
+
         let required_size = (width as usize) * (height as usize) * pixel_size;
         if src_data.len() < required_size {
             return Err(Error::InvalidArgument);
         }
-        
+
         // Transition texture to TRANSFER_DST_OPTIMAL
         self.transition_to_transfer_dst(dst_texture);
-        
+
         // Create staging buffer
         // Note: In a real implementation, we would use a staging buffer pool
         // For simplicity, we create a new allocation each time
         println!("Texture upload with DCC compression not yet implemented - using simple copy");
-        
+
         Ok(())
     }
-    
+
     /// Copy buffer data to texture (texture must be in TRANSFER_DST_OPTIMAL layout)
     pub fn copy_buffer_to_texture(
         &self,
@@ -2439,20 +2405,20 @@ impl CommandBuffer {
     }
 
     /// Bind texture descriptor heap for bindless texturing
-    pub fn bind_texture_heap(&self, heap: &TextureDescriptorHeap) {
+    pub fn bind_texture_heap(&self, _heap: &TextureDescriptorHeap) {
         // In a real implementation, this would set a global descriptor heap pointer
         // For now, we'll use push constants or a dedicated buffer
         // This is a placeholder for the actual implementation
         println!("Texture heap binding not yet implemented");
     }
-    
+
     /// Set root arguments for compute shader
     pub fn set_compute_root_arguments(&self, layout: &PipelineLayout, root_args: &RootArguments) {
         if layout.push_constant_size() >= 8 {
             self.push_constants(layout, &root_args.gpu_address().to_ne_bytes());
         }
     }
-    
+
     /// Set root arguments for graphics pipeline
     pub fn set_graphics_root_arguments(&self, layout: &PipelineLayout, root_args: &RootArguments) {
         if layout.push_constant_size() >= 8 {
@@ -2658,7 +2624,7 @@ impl Swapchain {
                     result
                 )));
             }
-            let capabilities = unsafe { capabilities.assume_init() };
+            let capabilities = capabilities.assume_init();
 
             // Choose swapchain format
             let mut format_count = 0;
