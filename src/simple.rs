@@ -1112,6 +1112,60 @@ impl Drop for ShaderModule {
     }
 }
 
+/// Root argument system for passing data to shaders
+/// Uses a single 64-bit pointer to a root data struct
+pub struct RootArguments {
+    allocation: GpuAllocation,
+    size: usize,
+}
+
+impl RootArguments {
+    /// Create root arguments for a given type
+    pub fn new<T>(context: &GraphicsContext) -> Result<Self> {
+        let size = std::mem::size_of::<T>();
+        let alignment = std::mem::align_of::<T>();
+        
+        let allocation = context.gpu_malloc(size, alignment, MemoryType::CpuMapped)?;
+        
+        Ok(RootArguments {
+            allocation,
+            size,
+        })
+    }
+    
+    /// Get CPU pointer for writing root data
+    pub fn cpu_ptr<T>(&self) -> *mut T {
+        self.allocation.cpu_ptr as *mut T
+    }
+    
+    /// Get GPU address for passing to shaders
+    pub fn gpu_address(&self) -> u64 {
+        self.allocation.gpu_ptr
+    }
+    
+    /// Write data to root arguments
+    pub fn write<T>(&self, data: &T) -> Result<()> {
+        if std::mem::size_of::<T>() > self.size {
+            return Err(Error::InvalidArgument);
+        }
+        
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                data as *const T as *const u8,
+                self.allocation.cpu_ptr,
+                std::mem::size_of::<T>(),
+            );
+        }
+        
+        Ok(())
+    }
+    
+    /// Get size in bytes
+    pub fn size(&self) -> usize {
+        self.size
+    }
+}
+
 /// Pipeline layout for describing resource bindings
 pub struct PipelineLayout {
     layout: crate::VkPipelineLayout,
@@ -2305,6 +2359,28 @@ impl CommandBuffer {
                 first_vertex,
                 first_instance,
             );
+        }
+    }
+
+    /// Bind texture descriptor heap for bindless texturing
+    pub fn bind_texture_heap(&self, heap: &TextureDescriptorHeap) {
+        // In a real implementation, this would set a global descriptor heap pointer
+        // For now, we'll use push constants or a dedicated buffer
+        // This is a placeholder for the actual implementation
+        println!("Texture heap binding not yet implemented");
+    }
+    
+    /// Set root arguments for compute shader
+    pub fn set_compute_root_arguments(&self, layout: &PipelineLayout, root_args: &RootArguments) {
+        if layout.push_constant_size() >= 8 {
+            self.push_constants(layout, &root_args.gpu_address().to_ne_bytes());
+        }
+    }
+    
+    /// Set root arguments for graphics pipeline
+    pub fn set_graphics_root_arguments(&self, layout: &PipelineLayout, root_args: &RootArguments) {
+        if layout.push_constant_size() >= 8 {
+            self.push_constants(layout, &root_args.gpu_address().to_ne_bytes());
         }
     }
 
