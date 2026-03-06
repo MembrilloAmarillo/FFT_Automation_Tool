@@ -11,7 +11,7 @@ use crate::simple::{
 };
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct UIVertex {
     position: [f32; 2],
     uv: [f32; 2],
@@ -22,9 +22,9 @@ struct UIVertex {
 #[derive(Clone, Copy)]
 struct UIPushConstants {
     vertex_ptr: u64,
-    projection: [[f32; 4]; 4],
-    // Padding to match GLSL alignment (std430 may add padding)
-    _padding: [u32; 2],
+    window_width: f32,
+    window_height: f32,
+    _padding: u32,
 }
 
 pub struct EguiRenderer {
@@ -58,8 +58,11 @@ impl EguiRenderer {
         )
         .map_err(|e| e.to_string())?;
 
-        // Create graphics pipeline
-        let pipeline = GraphicsPipeline::new(
+        // Create graphics pipeline with alpha blending for UI transparency.
+        // Must also set VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT because the
+        // scene pipeline (rendered before egui) uses descriptor buffers, and Vulkan
+        // requires all pipelines in that command buffer to carry the same flag.
+        let pipeline = GraphicsPipeline::new_with_blend_descriptor_buffer(
             context,
             &vs,
             &fs,
@@ -92,19 +95,42 @@ impl EguiRenderer {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
 
+        eprintln!(
+            "[egui] prepare() called with {} clipped primitives",
+            clipped_primitives.len()
+        );
+
         for ClippedPrimitive { primitive, .. } in clipped_primitives {
             match primitive {
                 egui::epaint::Primitive::Mesh(mesh) => {
+                    eprintln!(
+                        "[egui]   Mesh with {} vertices, {} indices",
+                        mesh.vertices.len(),
+                        mesh.indices.len()
+                    );
                     let index_offset = vertices.len() as u32;
 
                     // Convert egui mesh to our vertex format
-                    for vertex in &mesh.vertices {
+                    for (vi, vertex) in mesh.vertices.iter().enumerate() {
                         let color = vertex.color;
                         let [r, g, b, a] = color.to_srgba_unmultiplied();
+                        // Pre-multiply alpha for the pre-multiplied alpha blend equation:
+                        //   srcFactor=ONE, dstFactor=ONE_MINUS_SRC_ALPHA
+                        let a_f = a as f32 / 255.0;
+                        let pr = ((r as f32 / 255.0) * a_f * 255.0 + 0.5) as u8;
+                        let pg = ((g as f32 / 255.0) * a_f * 255.0 + 0.5) as u8;
+                        let pb = ((b as f32 / 255.0) * a_f * 255.0 + 0.5) as u8;
                         let packed_color = ((a as u32) << 24)
-                            | ((b as u32) << 16)
-                            | ((g as u32) << 8)
-                            | (r as u32);
+                            | ((pb as u32) << 16)
+                            | ((pg as u32) << 8)
+                            | (pr as u32);
+
+                        if vi < 3 {
+                            eprintln!(
+                                "[egui]   Vertex {}: pos=({:.2}, {:.2}), color=rgba({}, {}, {}, {}), packed=0x{:08x}",
+                                vi, vertex.pos.x, vertex.pos.y, pr, pg, pb, a, packed_color
+                            );
+                        }
 
                         vertices.push(UIVertex {
                             position: [vertex.pos.x, vertex.pos.y],
@@ -223,18 +249,22 @@ impl EguiRenderer {
         screen_height: f32,
     ) -> Result<(), String> {
         if self.vertex_buffer.is_none() || self.index_buffer.is_none() || self.index_count == 0 {
-            return Ok(()); // Nothing to render
+            eprintln!("[egui] render() skipped - no geometry");
+            return Ok(());
         }
+
+        eprintln!(
+            "[egui] render() drawing {} indices, {} vertices, screen ({:.1}x{:.1})",
+            self.index_count, self.vertex_count, screen_width, screen_height
+        );
 
         cmd.bind_pipeline(&self.pipeline);
 
-        // Orthographic projection matrix
-        let proj = ortho_projection(0.0, screen_width, screen_height, 0.0);
-
         let pc = UIPushConstants {
             vertex_ptr: self.vertex_buffer.as_ref().unwrap().device_address(),
-            projection: proj,
-            _padding: [0, 0],
+            window_width: screen_width,
+            window_height: screen_height,
+            _padding: 0,
         };
 
         let pc_bytes = unsafe {
@@ -245,12 +275,12 @@ impl EguiRenderer {
         };
         cmd.push_constants(&self.layout, pc_bytes);
 
-        // Bind index buffer (required even for device address vertex pulling)
-        // Vertices are accessed via device address in the shader
-        if let Some(ibuf) = &self.index_buffer {
-            cmd.bind_index_buffer(ibuf, 0, crate::simple::IndexType::U32);
-            cmd.draw_indexed(self.index_count as u32, 1, 0, 0, 0);
-        }
+        cmd.bind_index_buffer(
+            self.index_buffer.as_ref().unwrap(),
+            0,
+            crate::simple::IndexType::U32,
+        );
+        cmd.draw_indexed(self.index_count as u32, 1, 0, 0, 0);
 
         Ok(())
     }
@@ -270,18 +300,4 @@ fn load_spirv_u32(path: &str) -> Result<Vec<u32>, String> {
         words.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
     Ok(words)
-}
-
-fn ortho_projection(left: f32, right: f32, bottom: f32, top: f32) -> [[f32; 4]; 4] {
-    [
-        [2.0 / (right - left), 0.0, 0.0, 0.0],
-        [0.0, 2.0 / (top - bottom), 0.0, 0.0],
-        [0.0, 0.0, -1.0, 0.0],
-        [
-            -(right + left) / (right - left),
-            -(top + bottom) / (top - bottom),
-            0.0,
-            1.0,
-        ],
-    ]
 }

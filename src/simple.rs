@@ -159,6 +159,19 @@ bitflags::bitflags! {
     }
 }
 
+// Swapchain present-fence structure & constant for VK_KHR_swapchain_maintenance1.
+// Some loaders/drivers may not expose this in the generated bindings; we provide
+// a small local C-compatible struct (first member is the sType numeric value).
+pub const VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR: u32 = 1000275001;
+
+#[repr(C)]
+pub struct SwapchainPresentFenceInfoKHR {
+    pub sType: u32,
+    pub pNext: *const std::ffi::c_void,
+    pub swapchainCount: u32,
+    pub pFences: *const crate::VkFence,
+}
+
 // Shader stage constants for pipeline layouts
 pub const SHADER_STAGE_VERTEX: u32 =
     crate::VkShaderStageFlagBits::VK_SHADER_STAGE_VERTEX_BIT as u32;
@@ -305,6 +318,7 @@ pub struct GraphicsContext {
     _command_pool: crate::VkCommandPool,
     memory_properties: crate::VkPhysicalDeviceMemoryProperties,
     has_uma: bool,
+    descriptor_buffer_supported: bool,
 }
 
 impl GraphicsContext {
@@ -316,6 +330,7 @@ impl GraphicsContext {
         graphics_queue: crate::VkQueue,
         present_queue: crate::VkQueue,
         command_pool: crate::VkCommandPool,
+        descriptor_buffer_supported: bool,
     ) -> Result<Self> {
         unsafe {
             let mut memory_properties = std::mem::zeroed();
@@ -345,6 +360,7 @@ impl GraphicsContext {
                 _command_pool: command_pool,
                 memory_properties,
                 has_uma,
+                descriptor_buffer_supported,
             })
         }
     }
@@ -353,6 +369,10 @@ impl GraphicsContext {
     /// meaning at least one memory type is both host-visible and device-local.
     pub fn is_unified_memory(&self) -> bool {
         self.has_uma
+    }
+
+    pub fn descriptor_buffer_supported(&self) -> bool {
+        self.descriptor_buffer_supported
     }
 
     /// Find memory type index for given memory type
@@ -545,6 +565,130 @@ impl GraphicsContext {
     /// Free GPU memory (handled by Drop implementation of GpuAllocation)
     pub fn gpu_free(_allocation: GpuAllocation) {
         // Memory is freed when allocation goes out of scope
+    }
+
+    /// Allocate a descriptor buffer (VK_EXT_descriptor_buffer) suitable for binding with
+    /// `VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT`.
+    ///
+    /// This is needed for `TextureDescriptorHeap` to pass validation when binding via
+    /// `vkCmdBindDescriptorBuffersEXT`.
+    pub fn gpu_malloc_descriptor_buffer(
+        &self,
+        size: usize,
+        alignment: usize,
+    ) -> Result<GpuAllocation> {
+        use std::ptr;
+
+        if size == 0 {
+            return Err(Error::InvalidArgument);
+        }
+        if !self.descriptor_buffer_supported() {
+            return Err(Error::Unsupported);
+        }
+
+        unsafe {
+            let buffer_info = crate::VkBufferCreateInfo {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                pNext: ptr::null(),
+                flags: 0,
+                size: size as u64,
+                usage:
+                    (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT
+                        as u32)
+                        | (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+                            as u32),
+                sharingMode: crate::VkSharingMode::VK_SHARING_MODE_EXCLUSIVE,
+                queueFamilyIndexCount: 0,
+                pQueueFamilyIndices: ptr::null(),
+            };
+
+            let mut buffer: crate::VkBuffer = ptr::null_mut();
+            let result = crate::vkCreateBuffer(self.device, &buffer_info, ptr::null(), &mut buffer);
+            if result != crate::VkResult::VK_SUCCESS {
+                return Err(Error::Vulkan(format!(
+                    "Failed to create descriptor buffer: {:?}",
+                    result
+                )));
+            }
+
+            let mut requirements: crate::VkMemoryRequirements = std::mem::zeroed();
+            crate::vkGetBufferMemoryRequirements(self.device, buffer, &mut requirements);
+
+            let memory_type_index = self
+                .find_compatible_memory_type(MemoryType::CpuMapped, requirements.memoryTypeBits)?;
+
+            // Align allocation size to Vulkan requirements (and caller alignment to be safe)
+            let required_align = requirements.alignment.max(alignment as u64);
+            let aligned_size = if requirements.size % required_align == 0 {
+                requirements.size
+            } else {
+                (requirements.size / required_align + 1) * required_align
+            };
+
+            let mut flags_info = crate::VkMemoryAllocateFlagsInfo {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+                pNext: ptr::null(),
+                flags: crate::VkMemoryAllocateFlagBits::VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT
+                    as u32,
+                deviceMask: 0,
+            };
+
+            let alloc_info = crate::VkMemoryAllocateInfo {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                pNext: &mut flags_info as *mut _ as *mut std::ffi::c_void,
+                allocationSize: aligned_size,
+                memoryTypeIndex: memory_type_index,
+            };
+
+            let mut memory: crate::VkDeviceMemory = ptr::null_mut();
+            let result =
+                crate::vkAllocateMemory(self.device, &alloc_info, ptr::null(), &mut memory);
+            if result != crate::VkResult::VK_SUCCESS {
+                crate::vkDestroyBuffer(self.device, buffer, ptr::null());
+                return Err(Error::Vulkan(format!(
+                    "Failed to allocate descriptor buffer memory: {:?}",
+                    result
+                )));
+            }
+
+            let result = crate::vkBindBufferMemory(self.device, buffer, memory, 0);
+            if result != crate::VkResult::VK_SUCCESS {
+                crate::vkDestroyBuffer(self.device, buffer, ptr::null());
+                crate::vkFreeMemory(self.device, memory, ptr::null());
+                return Err(Error::Vulkan(format!(
+                    "Failed to bind descriptor buffer memory: {:?}",
+                    result
+                )));
+            }
+
+            let mut mapped_ptr: *mut std::ffi::c_void = ptr::null_mut();
+            let result =
+                crate::vkMapMemory(self.device, memory, 0, aligned_size, 0, &mut mapped_ptr);
+            if result != crate::VkResult::VK_SUCCESS {
+                crate::vkDestroyBuffer(self.device, buffer, ptr::null());
+                crate::vkFreeMemory(self.device, memory, ptr::null());
+                return Err(Error::Vulkan(format!(
+                    "Failed to map descriptor buffer memory: {:?}",
+                    result
+                )));
+            }
+
+            let addr_info = crate::VkBufferDeviceAddressInfo {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+                pNext: ptr::null(),
+                buffer,
+            };
+            let device_address = crate::vkGetBufferDeviceAddress(self.device, &addr_info);
+
+            Ok(GpuAllocation {
+                buffer,
+                memory,
+                cpu_ptr: mapped_ptr as *mut u8,
+                gpu_ptr: device_address,
+                size: size,
+                device: self.device,
+            })
+        }
     }
 
     /// Create a buffer and upload data efficiently.
@@ -921,6 +1065,63 @@ impl GraphicsContext {
             })
         }
     }
+
+    /// Submit command buffer using an existing VkFence (no fence creation)
+    /// The provided fence must be in the unsignaled state when passed to vkQueueSubmit.
+    pub fn submit_with_fence(
+        &self,
+        command_buffer: &CommandBuffer,
+        wait_semaphores: &[crate::VkSemaphore],
+        signal_semaphores: &[crate::VkSemaphore],
+        fence: crate::VkFence,
+    ) -> Result<()> {
+        use std::ptr;
+
+        unsafe {
+            // Create wait stage masks (all graphics)
+            let wait_stages: Vec<u32> = wait_semaphores
+                .iter()
+                .map(|_| {
+                    crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                        as u32
+                })
+                .collect();
+
+            let submit_info = crate::VkSubmitInfo {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                pNext: ptr::null(),
+                waitSemaphoreCount: wait_semaphores.len() as u32,
+                pWaitSemaphores: if wait_semaphores.is_empty() {
+                    ptr::null()
+                } else {
+                    wait_semaphores.as_ptr()
+                },
+                pWaitDstStageMask: if wait_stages.is_empty() {
+                    ptr::null()
+                } else {
+                    wait_stages.as_ptr()
+                },
+                commandBufferCount: 1,
+                pCommandBuffers: &command_buffer.vk_buffer(),
+                signalSemaphoreCount: signal_semaphores.len() as u32,
+                pSignalSemaphores: if signal_semaphores.is_empty() {
+                    ptr::null()
+                } else {
+                    signal_semaphores.as_ptr()
+                },
+            };
+
+            let result = crate::vkQueueSubmit(self._graphics_queue, 1, &submit_info, fence);
+            if result != crate::VkResult::VK_SUCCESS {
+                return Err(Error::Vulkan(format!(
+                    "Failed to submit command buffer with fence: {:?}",
+                    result
+                )));
+            }
+
+            Ok(())
+        }
+    }
 }
 
 /// Fence for synchronization
@@ -988,6 +1189,11 @@ impl Fence {
                 ))),
             }
         }
+    }
+
+    /// Return the raw VkFence handle
+    pub fn raw(&self) -> crate::VkFence {
+        self.fence
     }
 
     /// Reset the fence to unsignaled state (must be in signaled state)
@@ -1365,6 +1571,15 @@ impl Buffer {
     /// Create and upload a `u32` index buffer.
     pub fn index_buffer_u32(context: &GraphicsContext, indices: &[u32]) -> Result<Self> {
         context.create_index_buffer_u32(indices)
+    }
+
+    /// Create and upload a buffer for use with device addresses (bindless access).
+    /// This creates a storage buffer that can be accessed via device address in shaders.
+    pub fn from_device_address<T: Copy>(context: &GraphicsContext, data: &[T]) -> Result<Self> {
+        let bytes = unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+        };
+        context.create_buffer_with_data(BufferUsage::STORAGE, bytes)
     }
 
     /// Get the Vulkan buffer handle
@@ -1918,15 +2133,25 @@ impl PipelineLayout {
         set_layouts: &[DescriptorSetLayout],
         stage_flags: u32,
     ) -> Result<Self> {
+        Self::with_descriptor_set_layouts_and_push_size(context, set_layouts, stage_flags, 128)
+    }
+
+    /// Create a pipeline layout with descriptor set layouts and custom push constant size
+    pub fn with_descriptor_set_layouts_and_push_size(
+        context: &GraphicsContext,
+        set_layouts: &[DescriptorSetLayout],
+        stage_flags: u32,
+        push_constant_size: u32,
+    ) -> Result<Self> {
         use std::ptr;
 
         let set_layout_handles: Vec<_> = set_layouts.iter().map(|l| l.vk_layout()).collect();
 
-        let push_constant_range = if stage_flags != 0 {
+        let push_constant_range = if stage_flags != 0 && push_constant_size > 0 {
             Some(crate::VkPushConstantRange {
                 stageFlags: stage_flags,
                 offset: 0,
-                size: 8, // 64-bit pointer
+                size: push_constant_size,
             })
         } else {
             None
@@ -2063,15 +2288,17 @@ pub struct DescriptorSetLayout {
 }
 
 impl DescriptorSetLayout {
-    /// Create a bindless descriptor set layout for combined image samplers
+    /// Create a bindless descriptor set layout for combined image samplers.
+    ///
+    /// NOTE: This is intended for use with VK_EXT_descriptor_buffer.
+    /// We deliberately do NOT set `VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT_EXT`
+    /// here to avoid requiring the `descriptorBindingVariableDescriptorCount` feature.
+    /// Instead, we allocate a fixed-capacity runtime array (`textures[]`) with
+    /// `descriptorCount = max_textures`.
     pub fn new_bindless_textures(context: &GraphicsContext, max_textures: u32) -> Result<Self> {
         use std::ptr;
 
         unsafe {
-            // Binding flags: variable descriptor count, descriptor buffer
-            let binding_flags =
-                crate::VkDescriptorBindingFlagBits::VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT_EXT as u32;
-
             let binding = crate::VkDescriptorSetLayoutBinding {
                 binding: 0,
                 descriptorType: crate::VkDescriptorType::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -2080,17 +2307,53 @@ impl DescriptorSetLayout {
                 pImmutableSamplers: ptr::null(),
             };
 
-            let mut flags_create_info = crate::VkDescriptorSetLayoutBindingFlagsCreateInfo {
-                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
+            let create_info = crate::VkDescriptorSetLayoutCreateInfo {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
                 pNext: ptr::null(),
+                flags: crate::VkDescriptorSetLayoutCreateFlagBits::VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT as u32,
                 bindingCount: 1,
-                pBindingFlags: &binding_flags,
+                pBindings: &binding,
+            };
+
+            let mut layout = std::ptr::null_mut();
+            let result = crate::vkCreateDescriptorSetLayout(
+                context.device,
+                &create_info,
+                ptr::null(),
+                &mut layout,
+            );
+
+            if result != crate::VkResult::VK_SUCCESS {
+                return Err(Error::Vulkan(format!(
+                    "Failed to create descriptor set layout: {:?}",
+                    result
+                )));
+            }
+
+            Ok(DescriptorSetLayout {
+                layout,
+                device: context.device,
+            })
+        }
+    }
+
+    /// Create a standard (non-bindless) descriptor set layout for texture array
+    pub fn new_texture_array(context: &GraphicsContext, texture_count: u32) -> Result<Self> {
+        use std::ptr;
+
+        unsafe {
+            let binding = crate::VkDescriptorSetLayoutBinding {
+                binding: 0,
+                descriptorType: crate::VkDescriptorType::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                descriptorCount: texture_count,
+                stageFlags: crate::VkShaderStageFlagBits::VK_SHADER_STAGE_FRAGMENT_BIT as u32,
+                pImmutableSamplers: ptr::null(),
             };
 
             let create_info = crate::VkDescriptorSetLayoutCreateInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                pNext: &mut flags_create_info as *mut _ as *mut std::ffi::c_void,
-                flags: crate::VkDescriptorSetLayoutCreateFlagBits::VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT as u32,
+                pNext: ptr::null(),
+                flags: 0,
                 bindingCount: 1,
                 pBindings: &binding,
             };
@@ -2132,18 +2395,163 @@ impl Drop for DescriptorSetLayout {
     }
 }
 
+/// Descriptor pool for allocating traditional descriptor sets
+pub struct DescriptorPool {
+    pool: crate::VkDescriptorPool,
+    device: crate::VkDevice,
+}
+
+impl DescriptorPool {
+    /// Create a descriptor pool with capacity for the specified number of descriptor sets and descriptors
+    pub fn new(context: &GraphicsContext, max_sets: u32, max_samplers: u32) -> Result<Self> {
+        use std::ptr;
+
+        unsafe {
+            let pool_size = crate::VkDescriptorPoolSize {
+                type_: crate::VkDescriptorType::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                descriptorCount: max_samplers,
+            };
+
+            let create_info = crate::VkDescriptorPoolCreateInfo {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                pNext: ptr::null(),
+                flags: 0,
+                maxSets: max_sets,
+                poolSizeCount: 1,
+                pPoolSizes: &pool_size,
+            };
+
+            let mut pool = std::ptr::null_mut();
+            let result =
+                crate::vkCreateDescriptorPool(context.device, &create_info, ptr::null(), &mut pool);
+
+            if result != crate::VkResult::VK_SUCCESS {
+                return Err(Error::Vulkan(format!(
+                    "Failed to create descriptor pool: {:?}",
+                    result
+                )));
+            }
+
+            Ok(DescriptorPool {
+                pool,
+                device: context.device,
+            })
+        }
+    }
+
+    /// Allocate a descriptor set from this pool
+    pub fn allocate(&self, layout: &DescriptorSetLayout) -> Result<DescriptorSet> {
+        use std::ptr;
+
+        unsafe {
+            let layouts = [layout.vk_layout()];
+            let alloc_info = crate::VkDescriptorSetAllocateInfo {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                pNext: ptr::null(),
+                descriptorPool: self.pool,
+                descriptorSetCount: 1,
+                pSetLayouts: layouts.as_ptr(),
+            };
+
+            let mut set = std::ptr::null_mut();
+            let result = crate::vkAllocateDescriptorSets(self.device, &alloc_info, &mut set);
+
+            if result != crate::VkResult::VK_SUCCESS {
+                return Err(Error::Vulkan(format!(
+                    "Failed to allocate descriptor set: {:?}",
+                    result
+                )));
+            }
+
+            Ok(DescriptorSet {
+                set,
+                device: self.device,
+            })
+        }
+    }
+}
+
+impl Drop for DescriptorPool {
+    fn drop(&mut self) {
+        use std::ptr;
+        unsafe {
+            crate::vkDestroyDescriptorPool(self.device, self.pool, ptr::null());
+        }
+    }
+}
+
+/// A single descriptor set allocated from a descriptor pool
+pub struct DescriptorSet {
+    set: crate::VkDescriptorSet,
+    device: crate::VkDevice,
+}
+
+impl DescriptorSet {
+    /// Write texture samplers to this descriptor set
+    pub fn write_textures(
+        &self,
+        context: &GraphicsContext,
+        textures: &[&Texture],
+        sampler: crate::VkSampler,
+    ) -> Result<()> {
+        use std::ptr;
+
+        unsafe {
+            let mut image_infos: Vec<crate::VkDescriptorImageInfo> = textures
+                .iter()
+                .map(|tex| crate::VkDescriptorImageInfo {
+                    sampler,
+                    imageView: tex.image_view,
+                    imageLayout: crate::VkImageLayout::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                })
+                .collect();
+
+            let write = crate::VkWriteDescriptorSet {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                pNext: ptr::null(),
+                dstSet: self.set,
+                dstBinding: 0,
+                dstArrayElement: 0,
+                descriptorCount: image_infos.len() as u32,
+                descriptorType: crate::VkDescriptorType::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                pImageInfo: image_infos.as_mut_ptr(),
+                pBufferInfo: ptr::null(),
+                pTexelBufferView: ptr::null(),
+            };
+
+            crate::vkUpdateDescriptorSets(context.device, 1, &write, 0, ptr::null());
+            Ok(())
+        }
+    }
+
+    /// Get the Vulkan descriptor set handle
+    pub fn vk_set(&self) -> crate::VkDescriptorSet {
+        self.set
+    }
+}
+
 /// Texture descriptor heap for bindless texturing
-/// Manages an array of 256-bit texture descriptors in GPU memory
+/// Manages an array of combined-image-sampler descriptors in GPU memory.
 pub struct TextureDescriptorHeap {
     allocation: GpuAllocation,
     descriptor_size: usize,
     capacity: usize,
     used: usize,
+    image_views: Vec<crate::VkImageView>,
+    device: crate::VkDevice,
 }
 
 impl TextureDescriptorHeap {
-    /// Create a new texture descriptor heap with specified capacity
+    /// Create a new texture descriptor heap with specified capacity.
+    ///
+    /// IMPORTANT: The underlying buffer must be created with
+    /// `VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT` for
+    /// `vkCmdBindDescriptorBuffersEXT` validation to pass.
     pub fn new(context: &GraphicsContext, capacity: usize) -> Result<Self> {
+        if !context.descriptor_buffer_supported() {
+            return Err(Error::Unsupported);
+        }
+
         // Get descriptor buffer properties
         let mut properties = crate::VkPhysicalDeviceDescriptorBufferPropertiesEXT {
             sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT,
@@ -2162,15 +2570,21 @@ impl TextureDescriptorHeap {
 
         let descriptor_size = properties.combinedImageSamplerDescriptorSize as usize;
 
-        // Allocate GPU memory for descriptors
+        // Allocate GPU memory for descriptors. This allocation must be a buffer created with
+        // the descriptor-buffer usage flag, not a generic storage buffer.
         let size = capacity * descriptor_size;
-        let allocation = context.gpu_malloc(size, descriptor_size, MemoryType::CpuMapped)?;
+
+        // Descriptor buffer alignment requirement for offsets.
+        let alignment = properties.descriptorBufferOffsetAlignment as usize;
+        let allocation = context.gpu_malloc_descriptor_buffer(size, alignment)?;
 
         Ok(TextureDescriptorHeap {
             allocation,
             descriptor_size,
             capacity,
             used: 0,
+            image_views: vec![ptr::null_mut(); capacity],
+            device: context.device,
         })
     }
 
@@ -2187,7 +2601,7 @@ impl TextureDescriptorHeap {
     /// Write a texture descriptor at the specified index
     /// Uses vkGetDescriptorEXT to encode the hardware-specific descriptor
     pub fn write_descriptor(
-        &self,
+        &mut self,
         context: &GraphicsContext,
         index: u32,
         texture: &Texture,
@@ -2231,6 +2645,12 @@ impl TextureDescriptorHeap {
                 )));
             }
 
+            // Destroy the old image view at this slot if one exists
+            let old_view = self.image_views[index as usize];
+            if !old_view.is_null() {
+                crate::vkDestroyImageView(self.device, old_view, ptr::null());
+            }
+
             // Create combined image sampler descriptor info
             let image_info = crate::VkDescriptorImageInfo {
                 sampler,
@@ -2263,14 +2683,13 @@ impl TextureDescriptorHeap {
                 return Err(Error::Unsupported);
             }
 
+            // Store the image view for later destruction
+            self.image_views[index as usize] = image_view;
+
             println!(
                 "✓ Texture descriptor written at index {} (offset: 0x{:x}, size: {} bytes)",
                 index, offset, self.descriptor_size
             );
-
-            // Note: We deliberately leak the image view here because it's managed
-            // by the texture itself. In production, you might want to track these
-            // per descriptor for proper cleanup.
 
             Ok(())
         }
@@ -2302,6 +2721,18 @@ impl TextureDescriptorHeap {
     }
 }
 
+impl Drop for TextureDescriptorHeap {
+    fn drop(&mut self) {
+        unsafe {
+            for &image_view in &self.image_views {
+                if !image_view.is_null() {
+                    crate::vkDestroyImageView(self.device, image_view, std::ptr::null());
+                }
+            }
+        }
+    }
+}
+
 /// A graphics pipeline for rendering
 pub struct GraphicsPipeline {
     pipeline: crate::VkPipeline,
@@ -2310,7 +2741,7 @@ pub struct GraphicsPipeline {
 }
 
 impl GraphicsPipeline {
-    /// Create a simple graphics pipeline for rendering triangles
+    /// Create a simple graphics pipeline for rendering triangles (traditional descriptor sets).
     pub fn new(
         context: &GraphicsContext,
         vertex_shader: &ShaderModule,
@@ -2320,6 +2751,119 @@ impl GraphicsPipeline {
         _format: Format,
         vertex_specialization: Option<&SpecializationConstants>,
         fragment_specialization: Option<&SpecializationConstants>,
+    ) -> Result<Self> {
+        Self::new_internal(
+            context,
+            vertex_shader,
+            fragment_shader,
+            layout,
+            render_pass,
+            _format,
+            vertex_specialization,
+            fragment_specialization,
+            0, // no special pipeline create flags
+            false,
+            true,
+        )
+    }
+
+    /// Create a graphics pipeline that is compatible with VK_EXT_descriptor_buffer.
+    ///
+    /// This sets `VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT` so that descriptor
+    /// buffers bound via `vkCmdBindDescriptorBuffersEXT`/`vkCmdSetDescriptorBufferOffsetsEXT`
+    /// are considered valid for this pipeline.
+    pub fn new_descriptor_buffer(
+        context: &GraphicsContext,
+        vertex_shader: &ShaderModule,
+        fragment_shader: &ShaderModule,
+        layout: &PipelineLayout,
+        render_pass: crate::VkRenderPass,
+        _format: Format,
+        vertex_specialization: Option<&SpecializationConstants>,
+        fragment_specialization: Option<&SpecializationConstants>,
+    ) -> Result<Self> {
+        Self::new_internal(
+            context,
+            vertex_shader,
+            fragment_shader,
+            layout,
+            render_pass,
+            _format,
+            vertex_specialization,
+            fragment_specialization,
+            crate::VkPipelineCreateFlagBits::VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT as u32,
+            false,
+            true,
+        )
+    }
+
+    /// Create a graphics pipeline with alpha blending enabled (src_alpha / one_minus_src_alpha).
+    /// Suitable for UI overlays such as egui.
+    pub fn new_with_blend(
+        context: &GraphicsContext,
+        vertex_shader: &ShaderModule,
+        fragment_shader: &ShaderModule,
+        layout: &PipelineLayout,
+        render_pass: crate::VkRenderPass,
+        format: Format,
+        vertex_specialization: Option<&SpecializationConstants>,
+        fragment_specialization: Option<&SpecializationConstants>,
+    ) -> Result<Self> {
+        Self::new_internal(
+            context,
+            vertex_shader,
+            fragment_shader,
+            layout,
+            render_pass,
+            format,
+            vertex_specialization,
+            fragment_specialization,
+            0,
+            true,
+            true,
+        )
+    }
+
+    /// Create a graphics pipeline with alpha blending AND the descriptor-buffer flag.
+    /// Use this when rendering with blending in a frame that also uses
+    /// `VK_EXT_descriptor_buffer` (e.g. egui rendered after a descriptor-buffer scene pass).
+    pub fn new_with_blend_descriptor_buffer(
+        context: &GraphicsContext,
+        vertex_shader: &ShaderModule,
+        fragment_shader: &ShaderModule,
+        layout: &PipelineLayout,
+        render_pass: crate::VkRenderPass,
+        format: Format,
+        vertex_specialization: Option<&SpecializationConstants>,
+        fragment_specialization: Option<&SpecializationConstants>,
+    ) -> Result<Self> {
+        Self::new_internal(
+            context,
+            vertex_shader,
+            fragment_shader,
+            layout,
+            render_pass,
+            format,
+            vertex_specialization,
+            fragment_specialization,
+            crate::VkPipelineCreateFlagBits::VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT as u32,
+            true,
+            false, // egui draws at Z=0 like the scene; disable depth test to avoid being culled
+        )
+    }
+
+    fn new_internal(
+        context: &GraphicsContext,
+        vertex_shader: &ShaderModule,
+        fragment_shader: &ShaderModule,
+        layout: &PipelineLayout,
+        render_pass: crate::VkRenderPass,
+        _format: Format,
+        vertex_specialization: Option<&SpecializationConstants>,
+        fragment_specialization: Option<&SpecializationConstants>,
+        pipeline_create_flags: u32,
+        blend_enable: bool,
+        depth_test_enable: bool,
     ) -> Result<Self> {
         use std::ptr;
 
@@ -2433,14 +2977,16 @@ impl GraphicsPipeline {
                 alphaToOneEnable: 0,
             };
 
-            // Color blending (simple alpha blending)
+            // Color blending — pre-multiplied alpha (egui standard):
+            //   out.rgb = src.rgb + dst.rgb * (1 - src.a)
+            //   out.a   = src.a   + dst.a   * (1 - src.a)
             let color_blend_attachment = crate::VkPipelineColorBlendAttachmentState {
-                blendEnable: 0,
+                blendEnable: if blend_enable { 1 } else { 0 },
                 srcColorBlendFactor: crate::VkBlendFactor::VK_BLEND_FACTOR_ONE,
-                dstColorBlendFactor: crate::VkBlendFactor::VK_BLEND_FACTOR_ZERO,
+                dstColorBlendFactor: crate::VkBlendFactor::VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
                 colorBlendOp: crate::VkBlendOp::VK_BLEND_OP_ADD,
                 srcAlphaBlendFactor: crate::VkBlendFactor::VK_BLEND_FACTOR_ONE,
-                dstAlphaBlendFactor: crate::VkBlendFactor::VK_BLEND_FACTOR_ZERO,
+                dstAlphaBlendFactor: crate::VkBlendFactor::VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
                 alphaBlendOp: crate::VkBlendOp::VK_BLEND_OP_ADD,
                 colorWriteMask: crate::VkColorComponentFlagBits::VK_COLOR_COMPONENT_R_BIT as u32
                     | crate::VkColorComponentFlagBits::VK_COLOR_COMPONENT_G_BIT as u32
@@ -2474,8 +3020,8 @@ impl GraphicsPipeline {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
                 pNext: ptr::null(),
                 flags: 0,
-                depthTestEnable: 1,
-                depthWriteEnable: 1,
+                depthTestEnable: if depth_test_enable { 1 } else { 0 },
+                depthWriteEnable: if depth_test_enable { 1 } else { 0 },
                 depthCompareOp: crate::VkCompareOp::VK_COMPARE_OP_LESS,
                 depthBoundsTestEnable: 0,
                 stencilTestEnable: 0,
@@ -2505,7 +3051,7 @@ impl GraphicsPipeline {
             let pipeline_info = crate::VkGraphicsPipelineCreateInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
                 pNext: ptr::null(),
-                flags: 0,
+                flags: pipeline_create_flags,
                 stageCount: 2,
                 pStages: shader_stages.as_ptr(),
                 pVertexInputState: &vertex_input,
@@ -3058,6 +3604,28 @@ impl CommandBuffer {
         }
     }
 
+    /// Bind descriptor sets for graphics pipeline
+    pub fn bind_descriptor_sets(
+        &self,
+        layout: &PipelineLayout,
+        first_set: u32,
+        sets: &[&DescriptorSet],
+    ) {
+        unsafe {
+            let vk_sets: Vec<crate::VkDescriptorSet> = sets.iter().map(|s| s.vk_set()).collect();
+            crate::vkCmdBindDescriptorSets(
+                self.buffer,
+                crate::VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS,
+                layout.vk_layout(),
+                first_set,
+                vk_sets.len() as u32,
+                vk_sets.as_ptr(),
+                0,
+                std::ptr::null(),
+            );
+        }
+    }
+
     /// Bind a compute pipeline
     pub fn bind_compute_pipeline(&self, pipeline: &ComputePipeline) {
         unsafe {
@@ -3382,6 +3950,10 @@ impl DescriptorHeap {
     pub fn new(context: &GraphicsContext, capacity: usize) -> Result<Self> {
         use std::ptr;
 
+        if !context.descriptor_buffer_supported() {
+            return Err(Error::Unsupported);
+        }
+
         unsafe {
             // Get descriptor buffer properties
             let mut properties: crate::VkPhysicalDeviceDescriptorBufferPropertiesEXT =
@@ -3541,6 +4113,14 @@ pub struct Swapchain {
     #[allow(dead_code)]
     graphics_queue: crate::VkQueue,
     present_queue: crate::VkQueue,
+    // Per-swapchain-image semaphores signaled when rendering finishes for that image.
+    // Using one semaphore per swapchain image prevents reusing a signal semaphore
+    // for a different image while it may still be in use by the presentation operation.
+    image_render_finished_semaphores: Vec<crate::VkSemaphore>,
+    // Whether VK_KHR_swapchain_maintenance1 is supported by the device. When true,
+    // we can present using a VkFence via the present pNext chain and avoid per-image semaphores.
+    support_swapchain_maintenance1: bool,
+
     // Double buffering: 2 frames in flight
     frame_data: Vec<FrameData>,
     current_frame_index: usize,
@@ -4095,6 +4675,53 @@ impl Swapchain {
                 framebuffers.push(framebuffer);
             }
 
+            // Detect VK_KHR_swapchain_maintenance1 support on the device.
+            // If supported we can use a present-fence path and avoid allocating per-image semaphores.
+            let mut ext_count: u32 = 0;
+            let mut support_swapchain_maintenance1 = false;
+            unsafe {
+                let mut result = crate::vkEnumerateDeviceExtensionProperties(
+                    context._physical_device,
+                    std::ptr::null(),
+                    &mut ext_count,
+                    std::ptr::null_mut(),
+                );
+                if result == crate::VkResult::VK_SUCCESS && ext_count > 0 {
+                    let mut exts: Vec<crate::VkExtensionProperties> =
+                        Vec::with_capacity(ext_count as usize);
+                    result = crate::vkEnumerateDeviceExtensionProperties(
+                        context._physical_device,
+                        std::ptr::null(),
+                        &mut ext_count,
+                        exts.as_mut_ptr(),
+                    );
+                    if result == crate::VkResult::VK_SUCCESS {
+                        exts.set_len(ext_count as usize);
+                        for ext in &exts {
+                            // extensionName is a C string buffer; convert it to Rust &str safely.
+                            let name_ptr = ext.extensionName.as_ptr() as *const i8;
+                            if let Ok(name) = std::ffi::CStr::from_ptr(name_ptr).to_str() {
+                                if name == "VK_KHR_swapchain_maintenance1" {
+                                    support_swapchain_maintenance1 = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Create per-image render-finished semaphores only if the maintenance1 extension
+            // is not available. When maintenance1 is available we will use present-fence.
+            let mut image_render_finished_semaphores: Vec<crate::VkSemaphore> =
+                Vec::with_capacity(images.len());
+            if !support_swapchain_maintenance1 {
+                for _ in 0..images.len() {
+                    // Use the context helper to create semaphores; propagate error if creation fails
+                    let sem = context.create_semaphore()?;
+                    image_render_finished_semaphores.push(sem);
+                }
+            }
+
             // Create double-buffering frame data (2 frames in flight)
             let frame_data = vec![FrameData::create(context)?, FrameData::create(context)?];
 
@@ -4113,6 +4740,10 @@ impl Swapchain {
                 device: context.device,
                 graphics_queue: context._graphics_queue,
                 present_queue: context._present_queue,
+                // Whether the maintenance1 present-fence path is available on this device
+                support_swapchain_maintenance1,
+
+                image_render_finished_semaphores,
                 frame_data,
                 current_frame_index: 0,
                 current_image_index: 0,
@@ -4147,13 +4778,17 @@ impl Swapchain {
                 std::ptr::null_mut(),
                 &mut image_index,
             );
-            if result != crate::VkResult::VK_SUCCESS {
-                return Err(Error::Vulkan(format!(
+            match result {
+                crate::VkResult::VK_SUCCESS | crate::VkResult::VK_SUBOPTIMAL_KHR => Ok(image_index),
+                crate::VkResult::VK_ERROR_OUT_OF_DATE_KHR => {
+                    // Caller should recreate the swapchain
+                    Err(Error::Vulkan("Swapchain out of date".to_string()))
+                }
+                _ => Err(Error::Vulkan(format!(
                     "Failed to acquire next image: {:?}",
                     result
-                )));
+                ))),
             }
-            Ok(image_index)
         }
     }
 
@@ -4176,10 +4811,58 @@ impl Swapchain {
             };
 
             let result = crate::vkQueuePresentKHR(self.present_queue, &present_info);
-            if result != crate::VkResult::VK_SUCCESS {
-                return Err(Error::Vulkan(format!("Failed to present: {:?}", result)));
+            match result {
+                crate::VkResult::VK_SUCCESS | crate::VkResult::VK_SUBOPTIMAL_KHR => Ok(()),
+                crate::VkResult::VK_ERROR_OUT_OF_DATE_KHR => {
+                    // Caller should recreate the swapchain
+                    Err(Error::Vulkan("Swapchain out of date".to_string()))
+                }
+                _ => Err(Error::Vulkan(format!("Failed to present: {:?}", result))),
             }
-            Ok(())
+        }
+    }
+
+    /// Present using a VkFence via VK_KHR_swapchain_maintenance1
+    /// Requires that the device advertised support for the extension and that the
+    /// provided fence is the same fence used for the submission for this frame
+    /// (the application must ensure the fence is correctly reset prior to submit).
+    pub fn present_with_fence(&self, image_index: u32, fence: crate::VkFence) -> Result<()> {
+        use std::ptr;
+        unsafe {
+            let swapchains = [self.swapchain];
+            let image_indices = [image_index];
+
+            // Prepare the SwapchainPresentFenceInfoKHR with the fence to associate with this present.
+            let mut swapchain_fence_info = SwapchainPresentFenceInfoKHR {
+                sType: VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR,
+                pNext: ptr::null(),
+                swapchainCount: 1,
+                pFences: &fence as *const _,
+            };
+
+            let present_info = crate::VkPresentInfoKHR {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                pNext: &mut swapchain_fence_info as *mut _ as *const std::ffi::c_void,
+                waitSemaphoreCount: 0,
+                pWaitSemaphores: ptr::null(),
+                swapchainCount: 1,
+                pSwapchains: swapchains.as_ptr(),
+                pImageIndices: image_indices.as_ptr(),
+                pResults: ptr::null_mut(),
+            };
+
+            let result = crate::vkQueuePresentKHR(self.present_queue, &present_info);
+            match result {
+                crate::VkResult::VK_SUCCESS | crate::VkResult::VK_SUBOPTIMAL_KHR => Ok(()),
+                crate::VkResult::VK_ERROR_OUT_OF_DATE_KHR => {
+                    // Caller should recreate the swapchain
+                    Err(Error::Vulkan("Swapchain out of date".to_string()))
+                }
+                _ => Err(Error::Vulkan(format!(
+                    "Failed to present with fence: {:?}",
+                    result
+                ))),
+            }
         }
     }
 
@@ -4201,6 +4884,20 @@ impl Swapchain {
     /// Get the command buffer for the current frame
     pub fn current_command_buffer(&self) -> &CommandBuffer {
         &self.frame_data[self.current_frame_index].command_buffer
+    }
+
+    /// Get the number of frames in flight (i.e. how many per-frame slots are available).
+    /// This corresponds to the length of the `frame_data` vector and should be used
+    /// for allocating per-frame transient resources (e.g. root arguments, per-frame UBOs).
+    pub fn frames_in_flight(&self) -> usize {
+        self.frame_data.len()
+    }
+
+    /// Get the current frame index (0 .. frames_in_flight-1).
+    /// Use this to index per-frame resources safely — these slots are synchronized
+    /// using the per-frame `Fence` in `FrameData`.
+    pub fn current_frame_index(&self) -> usize {
+        self.current_frame_index
     }
 
     /// Begin a new frame for rendering with automatic frame synchronization
@@ -4234,21 +4931,36 @@ impl Swapchain {
         let current_frame = &self.frame_data[self.current_frame_index];
         let image_index = self.current_image_index;
 
-        // Submit command buffer with semaphore synchronization
-        current_frame.submit(
-            context,
-            &[current_frame.image_available_semaphore],
-            &[current_frame.render_finished_semaphore],
-        )?;
+        // Determine whether we should use maintenance1; debug toggle can force-disable it.
+        let use_maintenance1 = self.support_swapchain_maintenance1;
+        if use_maintenance1 {
+            // Submit using per-frame fence and no signal semaphore; present will use the fence via pNext.
+            current_frame.submit(
+                context,
+                &[current_frame.image_available_semaphore],
+                &[], // no signal semaphores when using present-fence
+            )?;
+            // Present using present-fence (per-frame fence)
+            self.present_with_fence(image_index, current_frame.fence.raw())?;
+        } else {
+            // Use the per-swapchain-image render-finished semaphore for this acquired image.
+            // This avoids signaling/reusing the same semaphore for different images while a
+            // presentation operation may still reference it.
+            let image_semaphore = self.image_render_finished_semaphores[image_index as usize];
 
-        // Present the image to the screen
-        self.present(image_index, current_frame.render_finished_semaphore)?;
+            // Submit command buffer with semaphore synchronization (wait image-available, signal image-specific finished semaphore)
+            current_frame.submit(
+                context,
+                &[current_frame.image_available_semaphore],
+                &[image_semaphore],
+            )?;
 
-        // Wait for device idle to ensure presentation has consumed the semaphores
-        // This is necessary because vkQueuePresentKHR is asynchronous
-        context.wait_idle()?;
+            // Present the image to the screen, waiting on the image-specific render-finished semaphore
+            self.present(image_index, image_semaphore)?;
+        }
 
-        // Advance to next frame (0 -> 1, 1 -> 0)
+        // Per-frame fences ensure that resources for the next frame are not reused
+        // until GPU work for this frame has completed.
         self.current_frame_index = 1 - self.current_frame_index;
 
         Ok(())
@@ -4263,11 +4975,17 @@ impl Drop for Swapchain {
             }
             crate::vkDestroyRenderPass(self.device, self.render_pass, std::ptr::null());
             for &image_view in &self.image_views {
-                crate::vkDestroyImageView(self.device, image_view, std::ptr::null());
+                crate::vkDestroyImageView(self.device, image_view, ptr::null());
             }
-            crate::vkDestroyImageView(self.device, self.depth_image_view, std::ptr::null());
-            crate::vkFreeMemory(self.device, self.depth_memory, std::ptr::null());
-            crate::vkDestroyImage(self.device, self.depth_image, std::ptr::null());
+            crate::vkDestroyImageView(self.device, self.depth_image_view, ptr::null());
+            crate::vkFreeMemory(self.device, self.depth_memory, ptr::null());
+            crate::vkDestroyImage(self.device, self.depth_image, ptr::null());
+
+            // Destroy per-image render-finished semaphores allocated for this swapchain
+            for &sem in &self.image_render_finished_semaphores {
+                crate::vkDestroySemaphore(self.device, sem, std::ptr::null());
+            }
+
             crate::vkDestroySwapchainKHR(self.device, self.swapchain, std::ptr::null());
         }
     }
@@ -4323,18 +5041,27 @@ impl FrameData {
     }
 
     /// Submit this frame's command buffer with semaphore synchronization
+    /// Uses the per-frame fence so the CPU is not blocked here and resources can
+    /// be reused only after the fence is signaled on the next frame.
     pub fn submit(
         &self,
         context: &GraphicsContext,
         wait_semaphores: &[crate::VkSemaphore],
         signal_semaphores: &[crate::VkSemaphore],
     ) -> Result<()> {
-        let fence = context.submit_with_semaphores(
+        // Reset the per-frame fence before submitting (it was waited on at the start of the frame)
+        self.reset_fence(context)?;
+
+        // Submit using the existing per-frame fence (do not create a new fence)
+        context.submit_with_fence(
             &self.command_buffer,
             wait_semaphores,
             signal_semaphores,
+            self.fence.raw(),
         )?;
-        fence.wait_forever()
+
+        // Do not wait here; allow GPU/CPU overlap. The fence will be waited on in begin_frame().
+        Ok(())
     }
 }
 

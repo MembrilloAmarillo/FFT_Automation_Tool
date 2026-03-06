@@ -11,7 +11,9 @@ struct Vertex {
 
 layout(push_constant) uniform PushConstants {
     uint64_t vertex_ptr;
-    mat4 projection;
+    float window_width;
+    float window_height;
+    uint padding;
 } pc;
 
 layout(buffer_reference, scalar) readonly buffer VertexBuffer {
@@ -22,16 +24,22 @@ layout(location = 0) out vec2 v_uv;
 layout(location = 1) out vec4 v_color;
 
 void main() {
-    uint idx = gl_VertexIndex;
-    
+    uint idx = uint(gl_VertexIndex);// % 6u;
+
     VertexBuffer vb = VertexBuffer(pc.vertex_ptr);
     Vertex v = vb.data[idx];
-    
-    gl_Position = pc.projection * vec4(v.position, 0.0, 1.0);
-    
+
+    // Normalize screen-space coordinates to NDC (-1 to 1)
+    // egui coordinates: (0,0) at top-left, (width,height) at bottom-right
+    // Vulkan NDC: (-1,-1) at bottom-left, (1,1) at top-right
+    // Need to flip Y axis
+    vec2 ndc = vec2(
+        (2.0 * v.position.x / pc.window_width) - 1.0,
+        1.0 - (2.0 * v.position.y / pc.window_height)
+    );
+
+    gl_Position = vec4(ndc, 0.0, 1.0);
+
     v_uv = v.uv;
-    // Unpack sRGB color from u32
-    vec4 color = unpackUnorm4x8(v.color);
-    // Convert from sRGB to linear
-    v_color = vec4(pow(color.rgb, vec3(2.2)), color.a);
+    v_color = unpackUnorm4x8(v.color);
 }
