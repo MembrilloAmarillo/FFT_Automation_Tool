@@ -26,10 +26,13 @@ void main() {
     VertexBuffer vb = VertexBuffer(pc.vertex_ptr);
     Vertex v = vb.data[gl_VertexIndex];
 
-    // egui screen-space → Vulkan NDC; flip Y so (0,0) top-left maps to (-1,-1)
+    // egui screen-space → Vulkan NDC
+    // egui: (0,0) top-left, Y increases downward
+    // Vulkan NDC: (-1,-1) top-left, (+1,+1) bottom-right  (Y also increases downward)
+    // So no Y flip is needed — just scale and shift both axes identically.
     vec2 ndc = vec2(
         (2.0 * v.position.x / pc.window_width)  - 1.0,
-        1.0 - (2.0 * v.position.y / pc.window_height)
+        (2.0 * v.position.y / pc.window_height) - 1.0
     );
 
     gl_Position = vec4(ndc, 0.0, 1.0);
