@@ -27,8 +27,8 @@ fn main() {
         "frag",
     );
 
-    compile_glsl_to_spirv("shaders/ui.vert.glsl", "shaders/ui.vert.spv", "vert");
-    compile_glsl_to_spirv("shaders/ui.frag.glsl", "shaders/ui.frag.spv", "frag");
+    compile_glsl_to_spirv("shaders/ui.vert", "shaders/ui.vert.spv", "vert");
+    compile_glsl_to_spirv("shaders/ui.frag", "shaders/ui.frag.spv", "frag");
 
     // Generate Vulkan bindings
     let bindings = bindgen::Builder::default()

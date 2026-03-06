@@ -53,6 +53,14 @@ struct Vertex {
 
 fn main() -> Result<(), String> {
     let sdl = SdlContext::init()?;
+    // Deliver mouse-button-down events even when the click is what gives the
+    // window focus (i.e. don't swallow the first click as a focus-gain event).
+    unsafe {
+        rust_and_vulkan::SDL_SetHint(
+            rust_and_vulkan::SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH.as_ptr() as *const i8,
+            b"1\0".as_ptr() as *const i8,
+        );
+    }
     let window = SdlWindow::new("Rotating Square (bindless textures + fallback)", 800, 600)?;
 
     // Instance + Surface + Device

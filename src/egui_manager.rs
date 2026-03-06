@@ -9,6 +9,7 @@ pub struct EguiManager {
     pub ctx: egui::Context,
     pointer_pos: egui::Pos2,
     raw_input: egui::RawInput,
+    start_time: std::time::Instant,
     // UI state
     pub selected_option: String,
     pub data_display: String,
@@ -27,6 +28,7 @@ impl EguiManager {
             ctx,
             pointer_pos: egui::Pos2::ZERO,
             raw_input: egui::RawInput::default(),
+            start_time: std::time::Instant::now(),
             selected_option: "None".to_string(),
             data_display: "No data selected".to_string(),
         }
@@ -44,6 +46,8 @@ impl EguiManager {
                         .push(egui::Event::PointerMoved(self.pointer_pos));
                 }
                 t if t == crate::SDL_EventType::SDL_EVENT_MOUSE_BUTTON_DOWN as u32 => {
+                    let btn = &event.button;
+                    self.pointer_pos = egui::Pos2::new(btn.x, btn.y);
                     self.raw_input.events.push(egui::Event::PointerButton {
                         pos: self.pointer_pos,
                         button: egui::PointerButton::Primary,
@@ -52,6 +56,8 @@ impl EguiManager {
                     });
                 }
                 t if t == crate::SDL_EventType::SDL_EVENT_MOUSE_BUTTON_UP as u32 => {
+                    let btn = &event.button;
+                    self.pointer_pos = egui::Pos2::new(btn.x, btn.y);
                     self.raw_input.events.push(egui::Event::PointerButton {
                         pos: self.pointer_pos,
                         button: egui::PointerButton::Primary,
@@ -104,6 +110,7 @@ impl EguiManager {
             egui::Pos2::ZERO,
             egui::Pos2::new(screen_width, screen_height),
         ));
+        self.raw_input.time = Some(self.start_time.elapsed().as_secs_f64());
         let raw_input = std::mem::take(&mut self.raw_input);
         self.ctx.begin_frame(raw_input);
     }
