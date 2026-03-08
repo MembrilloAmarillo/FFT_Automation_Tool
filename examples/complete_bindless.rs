@@ -31,6 +31,14 @@ fn main() -> Result<(), String> {
     println!("1. Graphics context created successfully.");
     println!();
 
+    if !context.descriptor_buffer_supported() {
+        println!(
+            "Descriptor buffer extension unavailable on this device; this example demonstrates bindless-only operations."
+        );
+        println!("Exiting successfully without running bindless steps.");
+        return Ok(());
+    }
+
     // Step 1: Create texture descriptor heap
     println!("2. Creating texture descriptor heap...");
     let mut texture_heap = TextureDescriptorHeap::new(&context, 1024)

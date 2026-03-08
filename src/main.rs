@@ -8,6 +8,7 @@ use rust_and_vulkan::simple::{
 };
 
 use glm as gl;
+use std::fmt::Write as _;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -92,10 +93,11 @@ fn main() -> Result<(), String> {
     let vs = ShaderModule::new(&context, &vert_spv).map_err(|e| e.to_string())?;
     let fs = ShaderModule::new(&context, &frag_spv).map_err(|e| e.to_string())?;
 
-    // This demo currently requires descriptor-buffer bindless textures.
-    // Exit before creating per-device resources if unsupported.
-    if !context.descriptor_buffer_supported() {
-        return Err("Descriptor buffer bindless textures are not supported on this device".to_string());
+    let use_bindless_descriptor_buffer = context.descriptor_buffer_supported();
+    if !use_bindless_descriptor_buffer {
+        eprintln!(
+            "Descriptor buffer extension unavailable; falling back to traditional descriptor sets"
+        );
     }
 
     // Geometry (vertex pulling via buffer device address)
@@ -184,37 +186,51 @@ fn main() -> Result<(), String> {
         .write_textures(&context, &[&texture], sampler)
         .map_err(|e| e.to_string())?;
 
-    // Pipeline layout for descriptor-buffer bindless textures:
-    //
-    // IMPORTANT:
-    // Even with VK_EXT_descriptor_buffer, the pipeline layout must still declare a descriptor set
-    // layout that matches the shader's set/binding usage. We create a descriptor-buffer-compatible
-    // set layout (set=0, binding=0) with a runtime array of combined image samplers, and include it
-    // in the pipeline layout.
-    //
-    // Push constants:
-    // The shaders use a 16-byte push-constant block (two u64 in VS, u32+padding in FS). We set 16.
-    let bindless_set_layout =
-        DescriptorSetLayout::new_bindless_textures(&context, 64).map_err(|e| e.to_string())?;
-    let layout = PipelineLayout::with_descriptor_set_layouts_and_push_size(
-        &context,
-        &[bindless_set_layout],
-        rust_and_vulkan::simple::SHADER_STAGE_VERTEX
-            | rust_and_vulkan::simple::SHADER_STAGE_FRAGMENT,
-        size_of::<PushConstants>() as u32,
-    )
-    .map_err(|e| e.to_string())?;
+    let layout = if use_bindless_descriptor_buffer {
+        let bindless_set_layout =
+            DescriptorSetLayout::new_bindless_textures(&context, 64).map_err(|e| e.to_string())?;
+        PipelineLayout::with_descriptor_set_layouts_and_push_size(
+            &context,
+            &[bindless_set_layout],
+            rust_and_vulkan::simple::SHADER_STAGE_VERTEX
+                | rust_and_vulkan::simple::SHADER_STAGE_FRAGMENT,
+            size_of::<PushConstants>() as u32,
+        )
+        .map_err(|e| e.to_string())?
+    } else {
+        PipelineLayout::with_descriptor_set_layouts_and_push_size(
+            &context,
+            &[set_layout],
+            rust_and_vulkan::simple::SHADER_STAGE_VERTEX
+                | rust_and_vulkan::simple::SHADER_STAGE_FRAGMENT,
+            size_of::<PushConstants>() as u32,
+        )
+        .map_err(|e| e.to_string())?
+    };
 
-    let pipeline = GraphicsPipeline::new_descriptor_buffer(
-        &context,
-        &vs,
-        &fs,
-        &layout,
-        swapchain.render_pass(),
-        Format::Bgra8Unorm,
-        None,
-        None,
-    )
+    let pipeline = if use_bindless_descriptor_buffer {
+        GraphicsPipeline::new_descriptor_buffer(
+            &context,
+            &vs,
+            &fs,
+            &layout,
+            swapchain.render_pass(),
+            Format::Bgra8Unorm,
+            None,
+            None,
+        )
+    } else {
+        GraphicsPipeline::new(
+            &context,
+            &vs,
+            &fs,
+            &layout,
+            swapchain.render_pass(),
+            Format::Bgra8Unorm,
+            None,
+            None,
+        )
+    }
     .map_err(|e| e.to_string())?;
 
     let start = std::time::Instant::now();
@@ -224,9 +240,36 @@ fn main() -> Result<(), String> {
     let mut egui_renderer =
         EguiRenderer::new(&context, swapchain.render_pass()).map_err(|e| e.to_string())?;
 
+    // Simple smoothed frame-rate estimator for UI display.
+    let mut last_frame_time = std::time::Instant::now();
+    let mut smoothed_refresh_hz: f32 = 0.0;
+    let smoothing_alpha: f32 = 0.10;
+    let mut refresh_label = String::from("Current refresh: --.- Hz");
+    let mut next_refresh_label_update = std::time::Instant::now();
+
     // Event + render loop
     let mut quit = false;
     while !quit {
+        let now = std::time::Instant::now();
+        let frame_dt = now.duration_since(last_frame_time).as_secs_f32();
+        last_frame_time = now;
+
+        let instant_refresh_hz = if frame_dt > 0.0 { 1.0 / frame_dt } else { 0.0 };
+        if smoothed_refresh_hz == 0.0 {
+            smoothed_refresh_hz = instant_refresh_hz;
+        } else {
+            smoothed_refresh_hz =
+                (1.0 - smoothing_alpha) * smoothed_refresh_hz + smoothing_alpha * instant_refresh_hz;
+        }
+
+        // Avoid generating a new label string every frame; updating a few times per
+        // second is enough for humans and prevents UI text-cache churn at very high FPS.
+        if now >= next_refresh_label_update {
+            refresh_label.clear();
+            let _ = write!(refresh_label, "Current refresh: {:.1} Hz", smoothed_refresh_hz);
+            next_refresh_label_update = now + std::time::Duration::from_millis(250);
+        }
+
         // Poll events
         unsafe {
             let mut event = std::mem::zeroed();
@@ -279,6 +322,8 @@ fn main() -> Result<(), String> {
                     ui.separator();
                     ui.label("Status:");
                     ui.label(&egui_manager.data_display);
+                    ui.separator();
+                    ui.label(&refresh_label);
                 });
         }
 
@@ -313,9 +358,10 @@ fn main() -> Result<(), String> {
 
         cmd.bind_pipeline(&pipeline);
 
-        // Bind bindless texture heap (descriptor buffer) at set=0.
-        // This requires a pipeline created with VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT.
-        if let Some(ref heap) = bindless_heap {
+        if use_bindless_descriptor_buffer {
+            let Some(ref heap) = bindless_heap else {
+                return Err("bindless mode selected but descriptor heap not initialized".to_string());
+            };
             cmd.bind_texture_heap(
                 heap,
                 &layout,
@@ -323,14 +369,7 @@ fn main() -> Result<(), String> {
                 rust_and_vulkan::VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS,
             );
         } else {
-            // If bindless isn't available, we currently don't draw.
-            // (You can extend this later to build a descriptor-set-compatible pipeline layout.)
-            cmd.end_render_pass();
-            cmd.end().map_err(|e| e.to_string())?;
-            if let Err(e) = swapchain.end_frame(&context) {
-                eprintln!("end_frame failed: {e:?}");
-            }
-            continue;
+            cmd.bind_descriptor_sets(&layout, 0, &[&fallback_set]);
         }
 
         // Update MVP matrix each frame: rotate around Z.

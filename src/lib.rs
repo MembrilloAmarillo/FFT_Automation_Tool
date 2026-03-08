@@ -12,6 +12,149 @@ pub use raw::*;
 
 // Validation layers
 const ENABLE_VALIDATION_LAYERS: bool = cfg!(debug_assertions);
+const VK_EXT_DEBUG_UTILS_NAME: &str = "VK_EXT_debug_utils";
+const VK_LAYER_KHRONOS_VALIDATION_NAME: &str = "VK_LAYER_KHRONOS_validation";
+const VK_KHR_SWAPCHAIN_NAME: &str = "VK_KHR_swapchain";
+const VK_KHR_SYNCHRONIZATION2_NAME: &str = "VK_KHR_synchronization2";
+const VK_EXT_DESCRIPTOR_BUFFER_NAME: &str = "VK_EXT_descriptor_buffer";
+const RAV_DISABLE_OPTIONAL_EXTENSIONS_ENV: &str = "RAV_DISABLE_OPTIONAL_EXTENSIONS";
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DeviceCapabilities {
+    pub descriptor_buffer_supported: bool,
+    pub descriptor_buffer_capture_replay: bool,
+    pub descriptor_buffer_image_layout_ignored: bool,
+    pub descriptor_indexing_supported: bool,
+}
+
+fn env_var_is_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|raw| {
+            let normalized = raw.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+unsafe fn enumerate_instance_extension_names() -> Result<Vec<String>, String> {
+    let mut extension_count = 0;
+    let result = crate::vkEnumerateInstanceExtensionProperties(
+        std::ptr::null(),
+        &mut extension_count,
+        std::ptr::null_mut(),
+    );
+    if result != crate::VkResult::VK_SUCCESS {
+        return Err(format!(
+            "Failed to enumerate instance extensions: {:?}",
+            result
+        ));
+    }
+
+    let mut extension_properties = Vec::with_capacity(extension_count as usize);
+    if extension_count > 0 {
+        let enumerate_result = crate::vkEnumerateInstanceExtensionProperties(
+            std::ptr::null(),
+            &mut extension_count,
+            extension_properties.as_mut_ptr(),
+        );
+        if enumerate_result != crate::VkResult::VK_SUCCESS {
+            return Err(format!(
+                "Failed to enumerate instance extensions: {:?}",
+                enumerate_result
+            ));
+        }
+        extension_properties.set_len(extension_count as usize);
+    }
+
+    Ok(extension_properties
+        .iter()
+        .map(|ext| {
+            std::ffi::CStr::from_ptr(ext.extensionName.as_ptr() as *const c_char)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect())
+}
+
+unsafe fn enumerate_instance_layer_names() -> Result<Vec<String>, String> {
+    let mut layer_count = 0;
+    let result = crate::vkEnumerateInstanceLayerProperties(&mut layer_count, std::ptr::null_mut());
+    if result != crate::VkResult::VK_SUCCESS {
+        return Err(format!(
+            "Failed to enumerate instance layers: {:?}",
+            result
+        ));
+    }
+
+    let mut layer_properties = Vec::with_capacity(layer_count as usize);
+    if layer_count > 0 {
+        let enumerate_result = crate::vkEnumerateInstanceLayerProperties(
+            &mut layer_count,
+            layer_properties.as_mut_ptr(),
+        );
+        if enumerate_result != crate::VkResult::VK_SUCCESS {
+            return Err(format!(
+                "Failed to enumerate instance layers: {:?}",
+                enumerate_result
+            ));
+        }
+        layer_properties.set_len(layer_count as usize);
+    }
+
+    Ok(layer_properties
+        .iter()
+        .map(|layer| {
+            std::ffi::CStr::from_ptr(layer.layerName.as_ptr() as *const c_char)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect())
+}
+
+unsafe fn enumerate_device_extension_names(
+    physical_device: crate::VkPhysicalDevice,
+) -> Result<Vec<String>, String> {
+    let mut extension_count = 0;
+    let result = crate::vkEnumerateDeviceExtensionProperties(
+        physical_device,
+        std::ptr::null(),
+        &mut extension_count,
+        std::ptr::null_mut(),
+    );
+    if result != crate::VkResult::VK_SUCCESS {
+        return Err(format!(
+            "Failed to enumerate device extensions: {:?}",
+            result
+        ));
+    }
+
+    let mut extension_properties = Vec::with_capacity(extension_count as usize);
+    if extension_count > 0 {
+        let enumerate_result = crate::vkEnumerateDeviceExtensionProperties(
+            physical_device,
+            std::ptr::null(),
+            &mut extension_count,
+            extension_properties.as_mut_ptr(),
+        );
+        if enumerate_result != crate::VkResult::VK_SUCCESS {
+            return Err(format!(
+                "Failed to enumerate device extensions: {:?}",
+                enumerate_result
+            ));
+        }
+        extension_properties.set_len(extension_count as usize);
+    }
+
+    Ok(extension_properties
+        .iter()
+        .map(|ext| {
+            std::ffi::CStr::from_ptr(ext.extensionName.as_ptr() as *const c_char)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect())
+}
 
 unsafe extern "C" fn debug_callback(
     message_severity: crate::VkDebugUtilsMessageSeverityFlagBitsEXT,
@@ -118,19 +261,54 @@ impl VulkanInstance {
                 ));
             }
             let sdl_extensions = std::slice::from_raw_parts(extensions_ptr, count as usize);
+            let available_instance_extensions = enumerate_instance_extension_names()?;
+
+            for &ext_ptr in sdl_extensions {
+                let ext_name = std::ffi::CStr::from_ptr(ext_ptr)
+                    .to_string_lossy()
+                    .into_owned();
+                if !available_instance_extensions.iter().any(|name| name == &ext_name) {
+                    return Err(format!(
+                        "Required SDL instance extension '{}' is not available on this system",
+                        ext_name
+                    ));
+                }
+            }
+
             let mut enabled_extensions: Vec<*const i8> = sdl_extensions.to_vec();
             eprintln!("ENABLE_VALIDATION_LAYERS = {}", ENABLE_VALIDATION_LAYERS);
             eprintln!("debug_assertions = {}", cfg!(debug_assertions));
 
+            let available_layers = enumerate_instance_layer_names()?;
+            let validation_layer_available = available_layers
+                .iter()
+                .any(|name| name == VK_LAYER_KHRONOS_VALIDATION_NAME);
+            let validation_enabled = ENABLE_VALIDATION_LAYERS && validation_layer_available;
+            if ENABLE_VALIDATION_LAYERS && !validation_layer_available {
+                eprintln!(
+                    "Validation layer '{}' not found; continuing without validation layers",
+                    VK_LAYER_KHRONOS_VALIDATION_NAME
+                );
+            }
+
+            let debug_utils_available = available_instance_extensions
+                .iter()
+                .any(|name| name == VK_EXT_DEBUG_UTILS_NAME);
+
             // Add debug utils extension if validation layers enabled
-            if ENABLE_VALIDATION_LAYERS {
-                eprintln!("Adding VK_EXT_debug_utils extension");
+            if validation_enabled && debug_utils_available {
+                eprintln!("Adding {} extension", VK_EXT_DEBUG_UTILS_NAME);
                 enabled_extensions.push(b"VK_EXT_debug_utils\0".as_ptr() as *const i8);
                 eprintln!("Debug utils extension added");
+            } else if validation_enabled {
+                eprintln!(
+                    "{} unavailable; validation will run without debug messenger",
+                    VK_EXT_DEBUG_UTILS_NAME
+                );
             }
 
             // Validation layers
-            let enabled_layers = if ENABLE_VALIDATION_LAYERS {
+            let enabled_layers = if validation_enabled {
                 eprintln!("Enabling Vulkan validation layers");
                 vec![b"VK_LAYER_KHRONOS_validation\0".as_ptr() as *const i8]
             } else {
@@ -171,7 +349,7 @@ impl VulkanInstance {
             if result != VkResult::VK_SUCCESS {
                 return Err(format!("vkCreateInstance failed: {:?}", result));
             }
-            let debug_messenger = if ENABLE_VALIDATION_LAYERS {
+            let debug_messenger = if validation_enabled && debug_utils_available {
                 Self::setup_debug_messenger(instance)
             } else {
                 None
@@ -295,6 +473,7 @@ pub struct VulkanDevice {
     pub present_queue: crate::VkQueue,
     pub command_pool: crate::VkCommandPool,
     pub instance: VulkanInstance,
+    pub capabilities: DeviceCapabilities,
     pub descriptor_buffer_supported: bool,
 }
 
@@ -482,43 +661,32 @@ impl VulkanDevice {
             };
             eprintln!("Present queue family index: {}", present_queue_family_index);
 
-            let mut extension_count = 0;
-            let result = crate::vkEnumerateDeviceExtensionProperties(
-                physical_device,
-                std::ptr::null(),
-                &mut extension_count,
-                std::ptr::null_mut(),
-            );
-            if result != crate::VkResult::VK_SUCCESS {
+            let available_device_extensions = enumerate_device_extension_names(physical_device)?;
+            let has_device_extension = |name: &str| {
+                available_device_extensions
+                    .iter()
+                    .any(|extension_name| extension_name == name)
+            };
+
+            if surface.is_some() && !has_device_extension(VK_KHR_SWAPCHAIN_NAME) {
                 return Err(format!(
-                    "Failed to enumerate device extensions: {:?}",
-                    result
+                    "Selected physical device '{}' is missing required device extension '{}' for presentation",
+                    selected_name, VK_KHR_SWAPCHAIN_NAME
                 ));
             }
-            let mut extension_properties = Vec::with_capacity(extension_count as usize);
-            if extension_count > 0 {
-                let enumerate_result = crate::vkEnumerateDeviceExtensionProperties(
-                    physical_device,
-                    std::ptr::null(),
-                    &mut extension_count,
-                    extension_properties.as_mut_ptr(),
+
+            let optional_extensions_disabled = env_var_is_truthy(RAV_DISABLE_OPTIONAL_EXTENSIONS_ENV);
+            if optional_extensions_disabled {
+                eprintln!(
+                    "{}=1 detected, optional device extensions/features will be disabled",
+                    RAV_DISABLE_OPTIONAL_EXTENSIONS_ENV
                 );
-                if enumerate_result != crate::VkResult::VK_SUCCESS {
-                    return Err(format!(
-                        "Failed to enumerate device extensions: {:?}",
-                        enumerate_result
-                    ));
-                }
-                extension_properties.set_len(extension_count as usize);
             }
-            let mut descriptor_buffer_extension_available = false;
-            for ext in &extension_properties {
-                let name = std::ffi::CStr::from_ptr(ext.extensionName.as_ptr() as *const c_char);
-                if name.to_bytes() == b"VK_EXT_descriptor_buffer" {
-                    descriptor_buffer_extension_available = true;
-                    break;
-                }
-            }
+
+            let descriptor_buffer_extension_available =
+                has_device_extension(VK_EXT_DESCRIPTOR_BUFFER_NAME);
+            let synchronization2_extension_available =
+                has_device_extension(VK_KHR_SYNCHRONIZATION2_NAME);
 
             let mut descriptor_buffer_features_query =
                 crate::VkPhysicalDeviceDescriptorBufferFeaturesEXT {
@@ -529,6 +697,15 @@ impl VulkanDevice {
                     descriptorBufferImageLayoutIgnored: 0,
                     descriptorBufferPushDescriptors: 0,
                 };
+            let mut vulkan12_features_query: crate::VkPhysicalDeviceVulkan12Features =
+                std::mem::zeroed();
+            vulkan12_features_query.sType =
+                crate::VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+            vulkan12_features_query.pNext = std::ptr::null_mut();
+
+            descriptor_buffer_features_query.pNext =
+                &mut vulkan12_features_query as *mut _ as *mut libc::c_void;
+
             let mut features2 = crate::VkPhysicalDeviceFeatures2 {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
                 pNext: &mut descriptor_buffer_features_query as *mut _ as *mut libc::c_void,
@@ -536,12 +713,38 @@ impl VulkanDevice {
             };
             crate::vkGetPhysicalDeviceFeatures2(physical_device, &mut features2);
 
-            let descriptor_buffer_supported = descriptor_buffer_extension_available
+            if vulkan12_features_query.bufferDeviceAddress == 0 {
+                return Err(format!(
+                    "Selected physical device '{}' does not support required Vulkan 1.2 feature bufferDeviceAddress",
+                    selected_name
+                ));
+            }
+            if vulkan12_features_query.scalarBlockLayout == 0 {
+                return Err(format!(
+                    "Selected physical device '{}' does not support required Vulkan 1.2 feature scalarBlockLayout",
+                    selected_name
+                ));
+            }
+
+            let descriptor_indexing_supported = vulkan12_features_query.descriptorIndexing != 0
+                && vulkan12_features_query.runtimeDescriptorArray != 0
+                && vulkan12_features_query.shaderSampledImageArrayNonUniformIndexing != 0;
+
+            let descriptor_buffer_supported = !optional_extensions_disabled
+                && descriptor_buffer_extension_available
+                && synchronization2_extension_available
+                && descriptor_indexing_supported
                 && descriptor_buffer_features_query.descriptorBuffer != 0;
             let descriptor_buffer_capture_replay = descriptor_buffer_supported
                 && descriptor_buffer_features_query.descriptorBufferCaptureReplay != 0;
             let descriptor_buffer_image_layout_ignored = descriptor_buffer_supported
                 && descriptor_buffer_features_query.descriptorBufferImageLayoutIgnored != 0;
+            let capabilities = DeviceCapabilities {
+                descriptor_buffer_supported,
+                descriptor_buffer_capture_replay,
+                descriptor_buffer_image_layout_ignored,
+                descriptor_indexing_supported,
+            };
 
             // Create logical device
             eprintln!("Creating logical device...");
@@ -570,7 +773,7 @@ impl VulkanDevice {
                 queue_create_infos.push(present_queue_info);
             }
 
-            // Required device extensions
+            // Required and optional device extensions
             let mut enabled_extensions = Vec::new();
             if surface.is_some() {
                 enabled_extensions.push(b"VK_KHR_swapchain\0".as_ptr() as *const i8);
@@ -579,16 +782,23 @@ impl VulkanDevice {
                 enabled_extensions.push(b"VK_EXT_descriptor_buffer\0".as_ptr() as *const i8);
                 enabled_extensions.push(b"VK_KHR_synchronization2\0".as_ptr() as *const i8);
             }
-            // Buffer device address is part of Vulkan 1.2+ core
-            // (no longer need this extension for newer drivers)
+
             eprintln!("Enabled device extensions:");
             for ext in &enabled_extensions {
-                eprintln!("  {:?}", std::ffi::CStr::from_ptr(*ext)); // unsafe but we know they are zero-terminated
+                eprintln!("  {:?}", std::ffi::CStr::from_ptr(*ext));
             }
+            eprintln!(
+                "Capabilities: descriptor_indexing_supported={}, descriptor_buffer_supported={}",
+                capabilities.descriptor_indexing_supported, capabilities.descriptor_buffer_supported
+            );
 
             // Core feature toggles
             let mut enabled_features: crate::VkPhysicalDeviceFeatures = std::mem::zeroed();
-            enabled_features.shaderInt64 = 1;
+            enabled_features.shaderInt64 = if features2.features.shaderInt64 != 0 {
+                crate::VK_TRUE
+            } else {
+                0
+            };
 
             // Vulkan 1.2 feature chain
             let mut vulkan12_features: crate::VkPhysicalDeviceVulkan12Features = std::mem::zeroed();
@@ -596,28 +806,41 @@ impl VulkanDevice {
                 crate::VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
             vulkan12_features.pNext = std::ptr::null_mut();
 
-            // Already required by your buffer-device-address + scalar block layout shaders.
-            vulkan12_features.bufferDeviceAddress = 1;
-            vulkan12_features.scalarBlockLayout = 1;
+            // Required by this abstraction.
+            vulkan12_features.bufferDeviceAddress = crate::VK_TRUE;
+            vulkan12_features.scalarBlockLayout = crate::VK_TRUE;
 
             // Required for bindless-style `sampler2D textures[];` runtime arrays and non-uniform indexing.
             // These satisfy validation errors like:
             // - Capability RuntimeDescriptorArray -> VkPhysicalDeviceVulkan12Features::runtimeDescriptorArray
             // - Capability SampledImageArrayNonUniformIndexing -> VkPhysicalDeviceVulkan12Features::shaderSampledImageArrayNonUniformIndexing
-            vulkan12_features.descriptorIndexing = 1;
-            vulkan12_features.runtimeDescriptorArray = 1;
-            vulkan12_features.shaderSampledImageArrayNonUniformIndexing = 1;
+            vulkan12_features.descriptorIndexing = if capabilities.descriptor_indexing_supported {
+                crate::VK_TRUE
+            } else {
+                0
+            };
+            vulkan12_features.runtimeDescriptorArray = if capabilities.descriptor_indexing_supported {
+                crate::VK_TRUE
+            } else {
+                0
+            };
+            vulkan12_features.shaderSampledImageArrayNonUniformIndexing =
+                if capabilities.descriptor_indexing_supported {
+                    crate::VK_TRUE
+                } else {
+                    0
+                };
 
             let mut descriptor_buffer_features_enable =
                 crate::VkPhysicalDeviceDescriptorBufferFeaturesEXT {
                     sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT,
                     pNext: &mut vulkan12_features as *mut _ as *mut libc::c_void,
-                    descriptorBuffer: if descriptor_buffer_supported { crate::VK_TRUE } else { 0 },
-                    descriptorBufferCaptureReplay: if descriptor_buffer_capture_replay { crate::VK_TRUE } else { 0 },
-                    descriptorBufferImageLayoutIgnored: if descriptor_buffer_image_layout_ignored { crate::VK_TRUE } else { 0 },
+                    descriptorBuffer: if capabilities.descriptor_buffer_supported { crate::VK_TRUE } else { 0 },
+                    descriptorBufferCaptureReplay: if capabilities.descriptor_buffer_capture_replay { crate::VK_TRUE } else { 0 },
+                    descriptorBufferImageLayoutIgnored: if capabilities.descriptor_buffer_image_layout_ignored { crate::VK_TRUE } else { 0 },
                     descriptorBufferPushDescriptors: 0,
                 };
-            let feature_chain = if descriptor_buffer_supported {
+            let feature_chain = if capabilities.descriptor_buffer_supported {
                 &mut descriptor_buffer_features_enable as *mut _ as *mut libc::c_void
             } else {
                 &mut vulkan12_features as *mut _ as *mut libc::c_void
@@ -688,7 +911,8 @@ impl VulkanDevice {
                 present_queue,
                 command_pool,
                 instance,
-                descriptor_buffer_supported,
+                capabilities,
+                descriptor_buffer_supported: capabilities.descriptor_buffer_supported,
             })
         }
     }

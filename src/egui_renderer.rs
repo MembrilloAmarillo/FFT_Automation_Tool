@@ -66,6 +66,9 @@ pub struct EguiRenderer {
     index_buffer: Option<Buffer>,
     vertex_capacity: usize,
     index_capacity: usize,
+    // Reused CPU-side scratch buffers to avoid per-frame Vec allocations.
+    scratch_vertices: Vec<UIVertex>,
+    scratch_indices: Vec<u32>,
     // Per-primitive draw calls (populated by prepare, consumed by render)
     draws: Vec<DrawCall>,
 }
@@ -130,6 +133,8 @@ impl EguiRenderer {
             index_buffer: None,
             vertex_capacity: 0,
             index_capacity: 0,
+            scratch_vertices: Vec::new(),
+            scratch_indices: Vec::new(),
             draws: Vec::new(),
         })
     }
@@ -142,6 +147,14 @@ impl EguiRenderer {
         context: &GraphicsContext,
         textures_delta: &egui::TexturesDelta,
     ) -> Result<(), String> {
+        for id in &textures_delta.free {
+            // We only own the default egui atlas texture in this renderer.
+            if *id == egui::TextureId::default() {
+                self.font_texture = None;
+                self.font_heap_written = false;
+            }
+        }
+
         for (id, delta) in &textures_delta.set {
             // We only handle the built-in font atlas (TextureId::default() == Managed(0))
             if *id != egui::TextureId::default() {
@@ -190,8 +203,8 @@ impl EguiRenderer {
         screen_width: f32,
         screen_height: f32,
     ) -> Result<(), String> {
-        let mut vertices: Vec<UIVertex> = Vec::new();
-        let mut indices: Vec<u32> = Vec::new();
+        self.scratch_vertices.clear();
+        self.scratch_indices.clear();
         self.draws.clear();
 
         for ClippedPrimitive {
@@ -205,8 +218,8 @@ impl EguiRenderer {
                         continue;
                     }
 
-                    let index_offset = vertices.len() as u32;
-                    let first_index = indices.len() as u32;
+                    let index_offset = self.scratch_vertices.len() as u32;
+                    let first_index = self.scratch_indices.len() as u32;
 
                     for vertex in &mesh.vertices {
                         let [r, g, b, a] = vertex.color.to_srgba_unmultiplied();
@@ -220,7 +233,7 @@ impl EguiRenderer {
                             | ((pg as u32) << 8)
                             | (pr as u32);
 
-                        vertices.push(UIVertex {
+                        self.scratch_vertices.push(UIVertex {
                             position: [vertex.pos.x, vertex.pos.y],
                             uv: [vertex.uv.x, vertex.uv.y],
                             color: packed,
@@ -228,7 +241,7 @@ impl EguiRenderer {
                     }
 
                     for index in &mesh.indices {
-                        indices.push(index_offset + index);
+                        self.scratch_indices.push(index_offset + index);
                     }
 
                     // Clamp clip_rect to the viewport and convert to integer pixels.
@@ -252,8 +265,8 @@ impl EguiRenderer {
             }
         }
 
-        if !vertices.is_empty() {
-            let needed = vertices.len() * std::mem::size_of::<UIVertex>();
+        if !self.scratch_vertices.is_empty() {
+            let needed = self.scratch_vertices.len() * std::mem::size_of::<UIVertex>();
             if self.vertex_capacity < needed || self.vertex_capacity > needed * 2 {
                 self.vertex_capacity = (needed as f32 * 1.2) as usize;
                 let buf = Buffer::new(
@@ -263,17 +276,17 @@ impl EguiRenderer {
                     MemoryType::CpuMapped,
                 )
                 .map_err(|e| format!("vertex buffer: {e}"))?;
-                buf.write(as_bytes(&vertices))
+                buf.write(as_bytes(&self.scratch_vertices))
                     .map_err(|e| format!("write vertices: {e}"))?;
                 self.vertex_buffer = Some(buf);
             } else if let Some(ref buf) = self.vertex_buffer {
-                buf.write(as_bytes(&vertices))
+                buf.write(as_bytes(&self.scratch_vertices))
                     .map_err(|e| format!("write vertices: {e}"))?;
             }
         }
 
-        if !indices.is_empty() {
-            let needed = indices.len() * std::mem::size_of::<u32>();
+        if !self.scratch_indices.is_empty() {
+            let needed = self.scratch_indices.len() * std::mem::size_of::<u32>();
             if self.index_capacity < needed || self.index_capacity > needed * 2 {
                 self.index_capacity = (needed as f32 * 1.2) as usize;
                 let buf = Buffer::new(
@@ -283,11 +296,11 @@ impl EguiRenderer {
                     MemoryType::CpuMapped,
                 )
                 .map_err(|e| format!("index buffer: {e}"))?;
-                buf.write(as_bytes(&indices))
+                buf.write(as_bytes(&self.scratch_indices))
                     .map_err(|e| format!("write indices: {e}"))?;
                 self.index_buffer = Some(buf);
             } else if let Some(ref buf) = self.index_buffer {
-                buf.write(as_bytes(&indices))
+                buf.write(as_bytes(&self.scratch_indices))
                     .map_err(|e| format!("write indices: {e}"))?;
             }
         }

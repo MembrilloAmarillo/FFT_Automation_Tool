@@ -3091,6 +3091,7 @@ impl Drop for ComputePipeline {
 pub struct CommandBuffer {
     buffer: crate::VkCommandBuffer,
     device: crate::VkDevice,
+    command_pool: crate::VkCommandPool,
 }
 
 impl CommandBuffer {
@@ -3119,6 +3120,7 @@ impl CommandBuffer {
             Ok(CommandBuffer {
                 buffer,
                 device: context.device,
+                command_pool: context.command_pool,
             })
         }
     }
@@ -3711,6 +3713,18 @@ pub struct Swapchain {
     frame_data: Vec<FrameData>,
     current_frame_index: usize,
     current_image_index: u32,
+    // Counts consecutive slow frame-sync events so diagnostics can be rate-limited.
+    slow_sync_log_counter: u32,
+}
+
+fn present_mode_name(mode: crate::VkPresentModeKHR) -> &'static str {
+    match mode {
+        crate::VkPresentModeKHR::VK_PRESENT_MODE_IMMEDIATE_KHR => "IMMEDIATE",
+        crate::VkPresentModeKHR::VK_PRESENT_MODE_MAILBOX_KHR => "MAILBOX",
+        crate::VkPresentModeKHR::VK_PRESENT_MODE_FIFO_KHR => "FIFO",
+        crate::VkPresentModeKHR::VK_PRESENT_MODE_FIFO_RELAXED_KHR => "FIFO_RELAXED",
+        _ => "OTHER",
+    }
 }
 
 impl Swapchain {
@@ -3819,6 +3833,10 @@ impl Swapchain {
                 .find(|&&mode| mode == crate::VkPresentModeKHR::VK_PRESENT_MODE_MAILBOX_KHR)
                 .copied()
                 .unwrap_or(crate::VkPresentModeKHR::VK_PRESENT_MODE_FIFO_KHR);
+            eprintln!(
+                "Swapchain present mode selected: {}",
+                present_mode_name(present_mode)
+            );
 
             // Determine swapchain extent
             let extent = if capabilities.currentExtent.width != u32::MAX {
@@ -4307,6 +4325,14 @@ impl Swapchain {
                     image_render_finished_semaphores.push(sem);
                 }
             }
+            eprintln!(
+                "Swapchain present synchronization path: {}",
+                if support_swapchain_maintenance1 {
+                    "VK_KHR_swapchain_maintenance1 present-fence"
+                } else {
+                    "binary semaphore"
+                }
+            );
 
             // Create double-buffering frame data (2 frames in flight)
             let frame_data = vec![FrameData::create(context)?, FrameData::create(context)?];
@@ -4333,6 +4359,7 @@ impl Swapchain {
                 frame_data,
                 current_frame_index: 0,
                 current_image_index: 0,
+                slow_sync_log_counter: 0,
             })
         }
     }
@@ -4494,13 +4521,33 @@ impl Swapchain {
     /// - Returns Ok if successful
     pub fn begin_frame(&mut self) -> Result<()> {
         let current_frame = &self.frame_data[self.current_frame_index];
+        let wait_start = std::time::Instant::now();
 
         // Wait for this frame's GPU work to complete before reusing it
         current_frame.wait()?;
+        let wait_ms = wait_start.elapsed().as_secs_f64() * 1000.0;
 
         // Acquire next image from swapchain
+        let acquire_start = std::time::Instant::now();
         self.current_image_index =
             self.acquire_next_image(current_frame.image_available_semaphore)?;
+        let acquire_ms = acquire_start.elapsed().as_secs_f64() * 1000.0;
+
+        let slow_sync = wait_ms > 2.0 || acquire_ms > 20.0;
+        if slow_sync {
+            self.slow_sync_log_counter = self.slow_sync_log_counter.wrapping_add(1);
+            // Print immediately on first slow frame, then every 60 consecutive slow frames.
+            if self.slow_sync_log_counter == 1 || self.slow_sync_log_counter % 60 == 0 {
+                eprintln!(
+                    "Frame sync wait (sampled): fence={wait_ms:.2} ms, acquire={acquire_ms:.2} ms, frame_slot={}, image_index={}, streak={}",
+                    self.current_frame_index,
+                    self.current_image_index,
+                    self.slow_sync_log_counter,
+                );
+            }
+        } else {
+            self.slow_sync_log_counter = 0;
+        }
 
         // Reset command buffer for reuse
         current_frame.command_buffer.reset()?;
@@ -4516,6 +4563,7 @@ impl Swapchain {
     pub fn end_frame(&mut self, context: &GraphicsContext) -> Result<()> {
         let current_frame = &self.frame_data[self.current_frame_index];
         let image_index = self.current_image_index;
+        let submit_present_start = std::time::Instant::now();
 
         // Determine whether we should use maintenance1; debug toggle can force-disable it.
         let use_maintenance1 = self.support_swapchain_maintenance1;
@@ -4543,6 +4591,14 @@ impl Swapchain {
 
             // Present the image to the screen, waiting on the image-specific render-finished semaphore
             self.present(image_index, image_semaphore)?;
+        }
+
+        let submit_present_ms = submit_present_start.elapsed().as_secs_f64() * 1000.0;
+        if submit_present_ms > 20.0 {
+            eprintln!(
+                "Frame submit/present time: {submit_present_ms:.2} ms (maintenance1={})",
+                use_maintenance1
+            );
         }
 
         // Per-frame fences ensure that resources for the next frame are not reused
@@ -4579,7 +4635,11 @@ impl Drop for Swapchain {
 
 impl Drop for CommandBuffer {
     fn drop(&mut self) {
-        // Command buffers are freed when the pool is destroyed
+        unsafe {
+            if !self.buffer.is_null() {
+                crate::vkFreeCommandBuffers(self.device, self.command_pool, 1, &self.buffer);
+            }
+        }
     }
 }
 

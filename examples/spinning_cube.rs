@@ -53,96 +53,100 @@ fn main() -> Result<(), String> {
     let frag_shader = ShaderModule::new(&context, &frag_words)
         .map_err(|e| format!("Failed to create fragment shader: {}", e))?;
 
-    println!("Creating texture descriptor heap...");
-    let mut texture_heap = TextureDescriptorHeap::new(&context, 256)
-        .map_err(|e| format!("Failed to create texture descriptor heap: {}", e))?;
+    let mut texture_heap_gpu_address = 0u64;
+    if context.descriptor_buffer_supported() {
+        println!("Creating texture descriptor heap...");
+        let mut texture_heap = TextureDescriptorHeap::new(&context, 256)
+            .map_err(|e| format!("Failed to create texture descriptor heap: {}", e))?;
 
-    println!("Creating test textures...");
+        println!("Creating test textures...");
 
-    // Helper function to create a simple gradient texture
-    let create_gradient_texture =
-        |color_r: u8, color_g: u8, color_b: u8| -> Result<Vec<u8>, String> {
-            let width = 256u32;
-            let height = 256u32;
-            let mut pixel_data = vec![0u8; (width * height * 4) as usize];
+        let create_gradient_texture =
+            |color_r: u8, color_g: u8, color_b: u8| -> Result<Vec<u8>, String> {
+                let width = 256u32;
+                let height = 256u32;
+                let mut pixel_data = vec![0u8; (width * height * 4) as usize];
 
-            for y in 0..height {
-                for x in 0..width {
-                    let idx = ((y * width + x) * 4) as usize;
-                    let r = ((x as f32 / width as f32) * color_r as f32) as u8;
-                    let g = ((y as f32 / height as f32) * color_g as f32) as u8;
-                    let b = color_b;
-                    let a = 255u8;
+                for y in 0..height {
+                    for x in 0..width {
+                        let idx = ((y * width + x) * 4) as usize;
+                        let r = ((x as f32 / width as f32) * color_r as f32) as u8;
+                        let g = ((y as f32 / height as f32) * color_g as f32) as u8;
+                        let b = color_b;
+                        let a = 255u8;
 
-                    pixel_data[idx] = r;
-                    pixel_data[idx + 1] = g;
-                    pixel_data[idx + 2] = b;
-                    pixel_data[idx + 3] = a;
+                        pixel_data[idx] = r;
+                        pixel_data[idx + 1] = g;
+                        pixel_data[idx + 2] = b;
+                        pixel_data[idx + 3] = a;
+                    }
                 }
-            }
-            Ok(pixel_data)
+                Ok(pixel_data)
+            };
+
+        let tex1_data = create_gradient_texture(255, 0, 0)?;
+        let tex2_data = create_gradient_texture(0, 255, 0)?;
+        let tex3_data = create_gradient_texture(0, 0, 255)?;
+
+        let mut upload_texture = |data: &[u8]| -> Result<u32, String> {
+            let staging = context
+                .gpu_malloc(data.len(), 256, MemoryType::CpuMapped)
+                .map_err(|e| format!("Failed to allocate staging buffer: {}", e))?;
+
+            staging
+                .write(data)
+                .map_err(|e| format!("Failed to write staging buffer: {}", e))?;
+
+            let texture = rust_and_vulkan::simple::Texture::new(
+                &context,
+                256,
+                256,
+                Format::Rgba8Unorm,
+                TextureUsage::SAMPLED | TextureUsage::TRANSFER_DST,
+            )
+            .map_err(|e| format!("Failed to create texture: {}", e))?;
+
+            let cmd = CommandBuffer::allocate(&context)
+                .map_err(|e| format!("Failed to allocate command buffer: {}", e))?;
+
+            cmd.begin()
+                .map_err(|e| format!("Failed to begin command buffer: {}", e))?;
+
+            cmd.transition_to_transfer_dst(&texture);
+            cmd.copy_buffer_to_texture(&staging, &texture, 256, 256);
+            cmd.transition_to_shader_read(&texture);
+
+            cmd.end()
+                .map_err(|e| format!("Failed to end command buffer: {}", e))?;
+
+            let fence = context
+                .submit(&cmd)
+                .map_err(|e| format!("Failed to submit command buffer: {}", e))?;
+            fence
+                .wait_forever()
+                .map_err(|e| format!("Failed to wait for fence: {}", e))?;
+
+            let tex_idx = texture_heap
+                .allocate()
+                .map_err(|e| format!("Failed to allocate texture index: {}", e))?;
+
+            Ok(tex_idx as u32)
         };
 
-    // Create multiple textures with different colors
-    let tex1_data = create_gradient_texture(255, 0, 0)?; // Red gradient
-    let tex2_data = create_gradient_texture(0, 255, 0)?; // Green gradient
-    let tex3_data = create_gradient_texture(0, 0, 255)?; // Blue gradient
+        let _tex1_idx = upload_texture(&tex1_data)?;
+        let _tex2_idx = upload_texture(&tex2_data)?;
+        let _tex3_idx = upload_texture(&tex3_data)?;
 
-    // Upload textures to GPU
-    let mut upload_texture = |data: &[u8]| -> Result<u32, String> {
-        let staging = context
-            .gpu_malloc(data.len(), 256, MemoryType::CpuMapped)
-            .map_err(|e| format!("Failed to allocate staging buffer: {}", e))?;
-
-        staging
-            .write(data)
-            .map_err(|e| format!("Failed to write staging buffer: {}", e))?;
-
-        let texture = rust_and_vulkan::simple::Texture::new(
-            &context,
-            256,
-            256,
-            Format::Rgba8Unorm,
-            TextureUsage::SAMPLED | TextureUsage::TRANSFER_DST,
-        )
-        .map_err(|e| format!("Failed to create texture: {}", e))?;
-
-        let cmd = CommandBuffer::allocate(&context)
-            .map_err(|e| format!("Failed to allocate command buffer: {}", e))?;
-
-        cmd.begin()
-            .map_err(|e| format!("Failed to begin command buffer: {}", e))?;
-
-        cmd.transition_to_transfer_dst(&texture);
-        cmd.copy_buffer_to_texture(&staging, &texture, 256, 256);
-        cmd.transition_to_shader_read(&texture);
-
-        cmd.end()
-            .map_err(|e| format!("Failed to end command buffer: {}", e))?;
-
-        let fence = context
-            .submit(&cmd)
-            .map_err(|e| format!("Failed to submit command buffer: {}", e))?;
-        fence
-            .wait_forever()
-            .map_err(|e| format!("Failed to wait for fence: {}", e))?;
-
-        // Allocate descriptor in heap and get index
-        let tex_idx = texture_heap
-            .allocate()
-            .map_err(|e| format!("Failed to allocate texture index: {}", e))?;
-
-        Ok(tex_idx as u32)
-    };
-
-    let _tex1_idx = upload_texture(&tex1_data)?;
-    let _tex2_idx = upload_texture(&tex2_data)?;
-    let _tex3_idx = upload_texture(&tex3_data)?;
-
-    println!(
-        "Texture descriptor heap initialized with {} textures",
-        texture_heap.used()
-    );
+        texture_heap_gpu_address = texture_heap.gpu_address();
+        println!(
+            "Texture descriptor heap initialized with {} textures",
+            texture_heap.used()
+        );
+    } else {
+        println!(
+            "Descriptor buffer extension unavailable; running cube rendering without bindless descriptor heap setup."
+        );
+    }
 
     println!("Creating pipeline layout with extended push constants...");
     let layout = PipelineLayout::with_push_constants_size(
@@ -231,8 +235,8 @@ fn main() -> Result<(), String> {
             push_data[0..64].copy_from_slice(std::slice::from_raw_parts(mvp_ptr, 64));
         }
 
-        // Copy texture heap GPU address (simulated - in real implementation would use texture_heap.gpu_address())
-        let heap_address = 0u64; // Placeholder
+        // Copy texture heap GPU address (0 when descriptor-buffer path is unavailable)
+        let heap_address = texture_heap_gpu_address;
         let heap_lo = (heap_address & 0xFFFFFFFF) as u32;
         let heap_hi = ((heap_address >> 32) & 0xFFFFFFFF) as u32;
 

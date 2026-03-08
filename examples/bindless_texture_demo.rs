@@ -2,8 +2,8 @@
 //! Shows texture descriptor heap, root arguments, texture upload, and GPU submission.
 
 use rust_and_vulkan::simple::{
-    CommandBuffer, Format, GraphicsPipeline, MemoryType, PipelineLayout, RootArguments,
-    ShaderModule, Texture, TextureDescriptorHeap, TextureUsage,
+    CommandBuffer, Format, MemoryType, PipelineLayout, RootArguments, Texture,
+    TextureDescriptorHeap, TextureUsage,
 };
 use rust_and_vulkan::{SdlContext, SdlWindow, VulkanDevice, VulkanInstance, VulkanSurface};
 
@@ -120,6 +120,16 @@ fn main() -> Result<(), String> {
     println!("✓ Graphics context ready");
     println!();
 
+    if !context.descriptor_buffer_supported() {
+        println!(
+            "Descriptor buffer extension unavailable on this device; skipping bindless-only demo workflow."
+        );
+        println!(
+            "Tip: run this example on a descriptor-buffer-capable adapter, or run src/main.rs for automatic fallback rendering."
+        );
+        return Ok(());
+    }
+
     // ===== PHASE 2: Texture Descriptor Heap =====
     println!("🎨 PHASE 2: TEXTURE DESCRIPTOR HEAP");
     println!("─────────────────────────────────────────────────────────────");
@@ -187,7 +197,7 @@ fn main() -> Result<(), String> {
     println!("─────────────────────────────────────────────────────────────");
 
     // Create a sampler for texture sampling
-    let sampler = context
+    let _sampler = context
         .create_default_sampler()
         .map_err(|e| format!("Failed to create sampler: {}", e))?;
     println!("✓ Default sampler created (linear filtering, repeat wrap)");
