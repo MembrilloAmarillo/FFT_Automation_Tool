@@ -10,9 +10,9 @@ use glm::ext::{look_at, perspective, rotate, scale, translate};
 use glm::{mat4, vec3, Mat4};
 use rust_and_vulkan::simple::{
     Buffer, CommandBuffer, ComputePipeline, DescriptorPool, DescriptorSetLayout, Error, Format,
-    GraphicsPipeline, HazardFlags, IndexType, MemoryType, PipelineLayout, RootArguments,
-    ShaderModule, Swapchain, Texture, TextureDescriptorHeap, TextureUsage, STAGE_COMPUTE,
-    STAGE_TRANSFER,
+    GraphicsPipeline, GraphicsPipelineConfig, HazardFlags, IndexType, MemoryType, PipelineLayout,
+    RootArguments, ShaderModule, Swapchain, Texture, TextureDescriptorHeap, TextureUsage,
+    STAGE_COMPUTE, STAGE_TRANSFER,
 };
 use rust_and_vulkan::{SdlContext, SdlWindow, VulkanDevice, VulkanInstance, VulkanSurface};
 use std::f32::consts::PI;
@@ -359,7 +359,7 @@ fn upload_texture_from_data(
     width: u32,
     height: u32,
 ) -> Result<Texture, String> {
-    let upload_cmd = CommandBuffer::allocate(context)
+    let _upload_cmd = CommandBuffer::allocate(context)
         .map_err(|e| format!("Failed to allocate upload command buffer: {}", e))?;
 
     context
@@ -561,28 +561,26 @@ fn main() -> Result<(), String> {
     )
     .map_err(|e| format!("Failed to create swapchain: {}", e))?;
 
-    let pipeline_3d = GraphicsPipeline::new(
+    let pipeline_3d = GraphicsPipeline::builder(
         &context,
         &mesh_vert,
         &mesh_frag,
         &layout_3d,
         swapchain.render_pass(),
-        Format::Bgra8Unorm,
-        None,
-        None,
     )
+    .with_config(GraphicsPipelineConfig::standard_opaque())
+    .build()
     .map_err(|e| format!("Failed to create 3D pipeline: {}", e))?;
 
-    let pipeline_2d = GraphicsPipeline::new(
+    let pipeline_2d = GraphicsPipeline::builder(
         &context,
         &overlay_vert,
         &overlay_frag,
         &layout_2d,
         swapchain.render_pass(),
-        Format::Bgra8Unorm,
-        None,
-        None,
     )
+    .with_config(GraphicsPipelineConfig::standard_opaque())
+    .build()
     .map_err(|e| format!("Failed to create 2D pipeline: {}", e))?;
 
     // Allocate per-frame root arguments sized to the number of frames in flight.

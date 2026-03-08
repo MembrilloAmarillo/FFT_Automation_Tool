@@ -886,7 +886,8 @@ impl GraphicsContext {
             let result = crate::vkResetCommandPool(
                 self.device,
                 self.command_pool,
-                crate::VkCommandPoolResetFlagBits::VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT as u32,
+                crate::VkCommandPoolResetFlagBits::VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT
+                    as u32,
             );
             if result != crate::VkResult::VK_SUCCESS {
                 return Err(Error::Vulkan(format!(
@@ -933,7 +934,9 @@ impl GraphicsContext {
             // Create wait stage masks on stack (typically 1-2 semaphores)
             // Avoid allocating Vec on every frame to prevent allocator churn
             const MAX_STAGES: usize = 8;
-            let mut wait_stages_array = [crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT as u32; MAX_STAGES];
+            let mut wait_stages_array =
+                [crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                    as u32; MAX_STAGES];
             let wait_stages = &wait_stages_array[0..wait_semaphores.len()];
 
             let submit_info = crate::VkSubmitInfo {
@@ -991,7 +994,9 @@ impl GraphicsContext {
             // Create wait stage masks on stack (typically 1-2 semaphores)
             // Avoid allocating Vec on every frame to prevent allocator churn
             const MAX_STAGES: usize = 8;
-            let mut wait_stages_array = [crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT as u32; MAX_STAGES];
+            let mut wait_stages_array =
+                [crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                    as u32; MAX_STAGES];
             let wait_stages = &wait_stages_array[0..wait_semaphores.len()];
 
             let submit_info = crate::VkSubmitInfo {
@@ -2644,6 +2649,314 @@ impl Drop for TextureDescriptorHeap {
     }
 }
 
+// ============================================================================
+// Pipeline Builder & Configuration Structures
+// ============================================================================
+
+/// Rasterization state configuration
+#[derive(Clone)]
+pub struct RasterizationState {
+    pub polygon_mode: crate::VkPolygonMode,
+    pub cull_mode: u32,
+    pub front_face: crate::VkFrontFace,
+    pub depth_bias_enable: bool,
+    pub depth_bias_constant_factor: f32,
+    pub depth_bias_clamp: f32,
+    pub depth_bias_slope_factor: f32,
+    pub line_width: f32,
+}
+
+impl RasterizationState {
+    /// Create default rasterization state (fill mode, back-face cull)
+    pub fn default() -> Self {
+        Self {
+            polygon_mode: crate::VkPolygonMode::VK_POLYGON_MODE_FILL,
+            cull_mode: crate::VkCullModeFlagBits::VK_CULL_MODE_BACK_BIT as u32,
+            front_face: crate::VkFrontFace::VK_FRONT_FACE_CLOCKWISE,
+            depth_bias_enable: false,
+            depth_bias_constant_factor: 0.0,
+            depth_bias_clamp: 0.0,
+            depth_bias_slope_factor: 0.0,
+            line_width: 1.0,
+        }
+    }
+
+    pub fn with_cull_mode(mut self, cull_mode: u32) -> Self {
+        self.cull_mode = cull_mode;
+        self
+    }
+
+    pub fn with_front_face(mut self, front_face: crate::VkFrontFace) -> Self {
+        self.front_face = front_face;
+        self
+    }
+
+    pub fn with_polygon_mode(mut self, polygon_mode: crate::VkPolygonMode) -> Self {
+        self.polygon_mode = polygon_mode;
+        self
+    }
+}
+
+/// Depth stencil state configuration
+#[derive(Clone)]
+pub struct DepthStencilState {
+    pub depth_test_enable: bool,
+    pub depth_write_enable: bool,
+    pub depth_compare_op: crate::VkCompareOp,
+    pub stencil_test_enable: bool,
+}
+
+impl DepthStencilState {
+    /// Create default depth stencil state (depth test enabled, less comparison)
+    pub fn default() -> Self {
+        Self {
+            depth_test_enable: true,
+            depth_write_enable: true,
+            depth_compare_op: crate::VkCompareOp::VK_COMPARE_OP_LESS,
+            stencil_test_enable: false,
+        }
+    }
+
+    pub fn with_depth_test(mut self, enable: bool) -> Self {
+        self.depth_test_enable = enable;
+        self.depth_write_enable = enable;
+        self
+    }
+
+    pub fn with_depth_compare(mut self, op: crate::VkCompareOp) -> Self {
+        self.depth_compare_op = op;
+        self
+    }
+}
+
+/// Color blend state configuration
+#[derive(Clone)]
+pub struct ColorBlendState {
+    pub blend_enable: bool,
+    pub src_color_blend_factor: crate::VkBlendFactor,
+    pub dst_color_blend_factor: crate::VkBlendFactor,
+    pub src_alpha_blend_factor: crate::VkBlendFactor,
+    pub dst_alpha_blend_factor: crate::VkBlendFactor,
+}
+
+impl ColorBlendState {
+    /// Create opaque blend state (no blending)
+    pub fn opaque() -> Self {
+        Self {
+            blend_enable: false,
+            src_color_blend_factor: crate::VkBlendFactor::VK_BLEND_FACTOR_ONE,
+            dst_color_blend_factor: crate::VkBlendFactor::VK_BLEND_FACTOR_ZERO,
+            src_alpha_blend_factor: crate::VkBlendFactor::VK_BLEND_FACTOR_ONE,
+            dst_alpha_blend_factor: crate::VkBlendFactor::VK_BLEND_FACTOR_ZERO,
+        }
+    }
+
+    /// Create alpha blend state (pre-multiplied alpha)
+    pub fn alpha() -> Self {
+        Self {
+            blend_enable: true,
+            src_color_blend_factor: crate::VkBlendFactor::VK_BLEND_FACTOR_ONE,
+            dst_color_blend_factor: crate::VkBlendFactor::VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+            src_alpha_blend_factor: crate::VkBlendFactor::VK_BLEND_FACTOR_ONE,
+            dst_alpha_blend_factor: crate::VkBlendFactor::VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        }
+    }
+
+    pub fn with_blend_enable(mut self, enable: bool) -> Self {
+        self.blend_enable = enable;
+        self
+    }
+}
+
+/// Complete graphics pipeline configuration
+pub struct GraphicsPipelineConfig {
+    pub rasterization: RasterizationState,
+    pub depth_stencil: DepthStencilState,
+    pub color_blend: ColorBlendState,
+    pub use_descriptor_buffer: bool,
+}
+
+impl GraphicsPipelineConfig {
+    /// Create standard opaque 3D rendering config (depth test, no blend, back-face cull)
+    pub fn standard_opaque() -> Self {
+        Self {
+            rasterization: RasterizationState::default(),
+            depth_stencil: DepthStencilState::default(),
+            color_blend: ColorBlendState::opaque(),
+            use_descriptor_buffer: false,
+        }
+    }
+
+    /// Create UI/transparent config (blend enabled, no depth test)
+    pub fn transparent_ui() -> Self {
+        Self {
+            rasterization: RasterizationState::default(),
+            depth_stencil: DepthStencilState::default().with_depth_test(false),
+            color_blend: ColorBlendState::alpha(),
+            use_descriptor_buffer: false,
+        }
+    }
+
+    /// Create postprocess config (no depth, fill mode)
+    pub fn postprocess() -> Self {
+        Self {
+            rasterization: RasterizationState::default(),
+            depth_stencil: DepthStencilState::default().with_depth_test(false),
+            color_blend: ColorBlendState::opaque(),
+            use_descriptor_buffer: false,
+        }
+    }
+
+    pub fn with_rasterization(mut self, raster: RasterizationState) -> Self {
+        self.rasterization = raster;
+        self
+    }
+
+    pub fn with_depth_stencil(mut self, depth: DepthStencilState) -> Self {
+        self.depth_stencil = depth;
+        self
+    }
+
+    pub fn with_color_blend(mut self, blend: ColorBlendState) -> Self {
+        self.color_blend = blend;
+        self
+    }
+
+    pub fn with_descriptor_buffer(mut self, use_it: bool) -> Self {
+        self.use_descriptor_buffer = use_it;
+        self
+    }
+}
+
+/// Builder for creating graphics pipelines with a fluent API
+pub struct GraphicsPipelineBuilder<'a> {
+    context: &'a GraphicsContext,
+    vertex_shader: &'a ShaderModule,
+    fragment_shader: &'a ShaderModule,
+    layout: &'a PipelineLayout,
+    render_pass: crate::VkRenderPass,
+    config: GraphicsPipelineConfig,
+    vertex_specialization: Option<&'a SpecializationConstants>,
+    fragment_specialization: Option<&'a SpecializationConstants>,
+}
+
+impl<'a> GraphicsPipelineBuilder<'a> {
+    /// Create a new graphics pipeline builder
+    pub fn new(
+        context: &'a GraphicsContext,
+        vertex_shader: &'a ShaderModule,
+        fragment_shader: &'a ShaderModule,
+        layout: &'a PipelineLayout,
+        render_pass: crate::VkRenderPass,
+    ) -> Self {
+        Self {
+            context,
+            vertex_shader,
+            fragment_shader,
+            layout,
+            render_pass,
+            config: GraphicsPipelineConfig::standard_opaque(),
+            vertex_specialization: None,
+            fragment_specialization: None,
+        }
+    }
+
+    /// Set the pipeline configuration
+    pub fn with_config(mut self, config: GraphicsPipelineConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Enable blending for transparency/UI
+    pub fn with_blending(mut self) -> Self {
+        self.config.color_blend = ColorBlendState::alpha();
+        self
+    }
+
+    /// Disable depth testing
+    pub fn without_depth_test(mut self) -> Self {
+        self.config.depth_stencil = self.config.depth_stencil.with_depth_test(false);
+        self
+    }
+
+    /// Enable descriptor buffer support
+    pub fn with_descriptor_buffer(mut self) -> Self {
+        if self.context.descriptor_buffer_supported() {
+            self.config.use_descriptor_buffer = true;
+        }
+        self
+    }
+
+    /// Set rasterization state
+    pub fn with_rasterization(mut self, raster: RasterizationState) -> Self {
+        self.config.rasterization = raster;
+        self
+    }
+
+    /// Set depth stencil state
+    pub fn with_depth_stencil(mut self, depth: DepthStencilState) -> Self {
+        self.config.depth_stencil = depth;
+        self
+    }
+
+    /// Set color blend state
+    pub fn with_color_blend(mut self, blend: ColorBlendState) -> Self {
+        self.config.color_blend = blend;
+        self
+    }
+
+    /// Set vertex shader specialization constants
+    pub fn with_vertex_specialization(mut self, spec: &'a SpecializationConstants) -> Self {
+        self.vertex_specialization = Some(spec);
+        self
+    }
+
+    /// Set fragment shader specialization constants
+    pub fn with_fragment_specialization(mut self, spec: &'a SpecializationConstants) -> Self {
+        self.fragment_specialization = Some(spec);
+        self
+    }
+
+    /// Set vertex shader specialization constants (optional)
+    pub fn with_vertex_specialization_opt(
+        mut self,
+        spec: Option<&'a SpecializationConstants>,
+    ) -> Self {
+        self.vertex_specialization = spec;
+        self
+    }
+
+    /// Set fragment shader specialization constants (optional)
+    pub fn with_fragment_specialization_opt(
+        mut self,
+        spec: Option<&'a SpecializationConstants>,
+    ) -> Self {
+        self.fragment_specialization = spec;
+        self
+    }
+
+    /// Build the graphics pipeline
+    pub fn build(self) -> Result<GraphicsPipeline> {
+        let pipeline_create_flags = if self.config.use_descriptor_buffer {
+            crate::VkPipelineCreateFlagBits::VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT as u32
+        } else {
+            0
+        };
+
+        GraphicsPipeline::new_internal(
+            self.context,
+            self.vertex_shader,
+            self.fragment_shader,
+            self.layout,
+            self.render_pass,
+            self.vertex_specialization,
+            self.fragment_specialization,
+            pipeline_create_flags,
+            &self.config,
+        )
+    }
+}
+
 /// A graphics pipeline for rendering
 pub struct GraphicsPipeline {
     pipeline: crate::VkPipeline,
@@ -2652,7 +2965,19 @@ pub struct GraphicsPipeline {
 }
 
 impl GraphicsPipeline {
+    /// Create a new graphics pipeline builder
+    pub fn builder<'a>(
+        context: &'a GraphicsContext,
+        vertex_shader: &'a ShaderModule,
+        fragment_shader: &'a ShaderModule,
+        layout: &'a PipelineLayout,
+        render_pass: crate::VkRenderPass,
+    ) -> GraphicsPipelineBuilder<'a> {
+        GraphicsPipelineBuilder::new(context, vertex_shader, fragment_shader, layout, render_pass)
+    }
+
     /// Create a simple graphics pipeline for rendering triangles (traditional descriptor sets).
+    /// Deprecated: Use `builder()` instead for better flexibility.
     pub fn new(
         context: &GraphicsContext,
         vertex_shader: &ShaderModule,
@@ -2663,26 +2988,15 @@ impl GraphicsPipeline {
         vertex_specialization: Option<&SpecializationConstants>,
         fragment_specialization: Option<&SpecializationConstants>,
     ) -> Result<Self> {
-        Self::new_internal(
-            context,
-            vertex_shader,
-            fragment_shader,
-            layout,
-            render_pass,
-            _format,
-            vertex_specialization,
-            fragment_specialization,
-            0, // no special pipeline create flags
-            false,
-            true,
-        )
+        GraphicsPipelineBuilder::new(context, vertex_shader, fragment_shader, layout, render_pass)
+            .with_config(GraphicsPipelineConfig::standard_opaque())
+            .with_vertex_specialization_opt(vertex_specialization)
+            .with_fragment_specialization_opt(fragment_specialization)
+            .build()
     }
 
     /// Create a graphics pipeline that is compatible with VK_EXT_descriptor_buffer.
-    ///
-    /// This sets `VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT` so that descriptor
-    /// buffers bound via `vkCmdBindDescriptorBuffersEXT`/`vkCmdSetDescriptorBufferOffsetsEXT`
-    /// are considered valid for this pipeline.
+    /// Deprecated: Use `builder().with_descriptor_buffer()` instead.
     pub fn new_descriptor_buffer(
         context: &GraphicsContext,
         vertex_shader: &ShaderModule,
@@ -2697,81 +3011,17 @@ impl GraphicsPipeline {
             return Err(Error::Unsupported);
         }
 
-        Self::new_internal(
-            context,
-            vertex_shader,
-            fragment_shader,
-            layout,
-            render_pass,
-            _format,
-            vertex_specialization,
-            fragment_specialization,
-            crate::VkPipelineCreateFlagBits::VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT as u32,
-            false,
-            true,
-        )
+        GraphicsPipelineBuilder::new(context, vertex_shader, fragment_shader, layout, render_pass)
+            .with_descriptor_buffer()
+            .with_vertex_specialization_opt(vertex_specialization)
+            .with_fragment_specialization_opt(fragment_specialization)
+            .build()
     }
 
     /// Create a graphics pipeline with alpha blending enabled (src_alpha / one_minus_src_alpha).
     /// Suitable for UI overlays such as egui.
+    /// Deprecated: Use `builder().with_blending()` instead.
     pub fn new_with_blend(
-        context: &GraphicsContext,
-        vertex_shader: &ShaderModule,
-        fragment_shader: &ShaderModule,
-        layout: &PipelineLayout,
-        render_pass: crate::VkRenderPass,
-        format: Format,
-        vertex_specialization: Option<&SpecializationConstants>,
-        fragment_specialization: Option<&SpecializationConstants>,
-    ) -> Result<Self> {
-        Self::new_internal(
-            context,
-            vertex_shader,
-            fragment_shader,
-            layout,
-            render_pass,
-            format,
-            vertex_specialization,
-            fragment_specialization,
-            0,
-            true,
-            true,
-        )
-    }
-
-    /// Create a graphics pipeline with alpha blending AND the descriptor-buffer flag.
-    /// Use this when rendering with blending in a frame that also uses
-    /// `VK_EXT_descriptor_buffer` (e.g. egui rendered after a descriptor-buffer scene pass).
-    pub fn new_with_blend_descriptor_buffer(
-        context: &GraphicsContext,
-        vertex_shader: &ShaderModule,
-        fragment_shader: &ShaderModule,
-        layout: &PipelineLayout,
-        render_pass: crate::VkRenderPass,
-        format: Format,
-        vertex_specialization: Option<&SpecializationConstants>,
-        fragment_specialization: Option<&SpecializationConstants>,
-    ) -> Result<Self> {
-        if !context.descriptor_buffer_supported() {
-            return Err(Error::Unsupported);
-        }
-
-        Self::new_internal(
-            context,
-            vertex_shader,
-            fragment_shader,
-            layout,
-            render_pass,
-            format,
-            vertex_specialization,
-            fragment_specialization,
-            crate::VkPipelineCreateFlagBits::VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT as u32,
-            true,
-            false, // egui draws at Z=0 like the scene; disable depth test to avoid being culled
-        )
-    }
-
-    fn new_internal(
         context: &GraphicsContext,
         vertex_shader: &ShaderModule,
         fragment_shader: &ShaderModule,
@@ -2780,9 +3030,50 @@ impl GraphicsPipeline {
         _format: Format,
         vertex_specialization: Option<&SpecializationConstants>,
         fragment_specialization: Option<&SpecializationConstants>,
+    ) -> Result<Self> {
+        GraphicsPipelineBuilder::new(context, vertex_shader, fragment_shader, layout, render_pass)
+            .with_blending()
+            .with_vertex_specialization_opt(vertex_specialization)
+            .with_fragment_specialization_opt(fragment_specialization)
+            .build()
+    }
+
+    /// Create a graphics pipeline with alpha blending AND the descriptor-buffer flag.
+    /// Use this when rendering with blending in a frame that also uses
+    /// `VK_EXT_descriptor_buffer` (e.g. egui rendered after a descriptor-buffer scene pass).
+    /// Deprecated: Use `builder().with_blending().with_descriptor_buffer()` instead.
+    pub fn new_with_blend_descriptor_buffer(
+        context: &GraphicsContext,
+        vertex_shader: &ShaderModule,
+        fragment_shader: &ShaderModule,
+        layout: &PipelineLayout,
+        render_pass: crate::VkRenderPass,
+        _format: Format,
+        vertex_specialization: Option<&SpecializationConstants>,
+        fragment_specialization: Option<&SpecializationConstants>,
+    ) -> Result<Self> {
+        if !context.descriptor_buffer_supported() {
+            return Err(Error::Unsupported);
+        }
+
+        GraphicsPipelineBuilder::new(context, vertex_shader, fragment_shader, layout, render_pass)
+            .with_config(GraphicsPipelineConfig::transparent_ui())
+            .with_descriptor_buffer()
+            .with_vertex_specialization_opt(vertex_specialization)
+            .with_fragment_specialization_opt(fragment_specialization)
+            .build()
+    }
+
+    fn new_internal(
+        context: &GraphicsContext,
+        vertex_shader: &ShaderModule,
+        fragment_shader: &ShaderModule,
+        layout: &PipelineLayout,
+        render_pass: crate::VkRenderPass,
+        vertex_specialization: Option<&SpecializationConstants>,
+        fragment_specialization: Option<&SpecializationConstants>,
         pipeline_create_flags: u32,
-        blend_enable: bool,
-        depth_test_enable: bool,
+        config: &GraphicsPipelineConfig,
     ) -> Result<Self> {
         use std::ptr;
 
@@ -2849,21 +3140,21 @@ impl GraphicsPipeline {
                 pScissors: ptr::null(), // ignored — VK_DYNAMIC_STATE_SCISSOR
             };
 
-            // Rasterization
+            // Rasterization from config
             let rasterization = crate::VkPipelineRasterizationStateCreateInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
                 pNext: ptr::null(),
                 flags: 0,
                 depthClampEnable: 0,
                 rasterizerDiscardEnable: 0,
-                polygonMode: crate::VkPolygonMode::VK_POLYGON_MODE_FILL,
-                cullMode: crate::VkCullModeFlagBits::VK_CULL_MODE_NONE as u32,
-                frontFace: crate::VkFrontFace::VK_FRONT_FACE_CLOCKWISE,
-                depthBiasEnable: 0,
-                depthBiasConstantFactor: 0.0,
-                depthBiasClamp: 0.0,
-                depthBiasSlopeFactor: 0.0,
-                lineWidth: 1.0,
+                polygonMode: config.rasterization.polygon_mode,
+                cullMode: config.rasterization.cull_mode,
+                frontFace: config.rasterization.front_face,
+                depthBiasEnable: if config.rasterization.depth_bias_enable { 1 } else { 0 },
+                depthBiasConstantFactor: config.rasterization.depth_bias_constant_factor,
+                depthBiasClamp: config.rasterization.depth_bias_clamp,
+                depthBiasSlopeFactor: config.rasterization.depth_bias_slope_factor,
+                lineWidth: config.rasterization.line_width,
             };
 
             // Multisampling (disabled)
@@ -2880,16 +3171,18 @@ impl GraphicsPipeline {
                 alphaToOneEnable: 0,
             };
 
-            // Color blending — pre-multiplied alpha (egui standard):
-            //   out.rgb = src.rgb + dst.rgb * (1 - src.a)
-            //   out.a   = src.a   + dst.a   * (1 - src.a)
+            // Color blending from config
             let color_blend_attachment = crate::VkPipelineColorBlendAttachmentState {
-                blendEnable: if blend_enable { 1 } else { 0 },
-                srcColorBlendFactor: crate::VkBlendFactor::VK_BLEND_FACTOR_ONE,
-                dstColorBlendFactor: crate::VkBlendFactor::VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+                blendEnable: if config.color_blend.blend_enable {
+                    1
+                } else {
+                    0
+                },
+                srcColorBlendFactor: config.color_blend.src_color_blend_factor,
+                dstColorBlendFactor: config.color_blend.dst_color_blend_factor,
                 colorBlendOp: crate::VkBlendOp::VK_BLEND_OP_ADD,
-                srcAlphaBlendFactor: crate::VkBlendFactor::VK_BLEND_FACTOR_ONE,
-                dstAlphaBlendFactor: crate::VkBlendFactor::VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+                srcAlphaBlendFactor: config.color_blend.src_alpha_blend_factor,
+                dstAlphaBlendFactor: config.color_blend.dst_alpha_blend_factor,
                 alphaBlendOp: crate::VkBlendOp::VK_BLEND_OP_ADD,
                 colorWriteMask: crate::VkColorComponentFlagBits::VK_COLOR_COMPONENT_R_BIT as u32
                     | crate::VkColorComponentFlagBits::VK_COLOR_COMPONENT_G_BIT as u32
@@ -2923,16 +3216,16 @@ impl GraphicsPipeline {
                 pDynamicStates: dynamic_states.as_ptr(),
             };
 
-            // Depth stencil state for depth testing
+            // Depth stencil state from config
             let depth_stencil = crate::VkPipelineDepthStencilStateCreateInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
                 pNext: ptr::null(),
                 flags: 0,
-                depthTestEnable: if depth_test_enable { 1 } else { 0 },
-                depthWriteEnable: if depth_test_enable { 1 } else { 0 },
-                depthCompareOp: crate::VkCompareOp::VK_COMPARE_OP_LESS,
+                depthTestEnable: if config.depth_stencil.depth_test_enable { 1 } else { 0 },
+                depthWriteEnable: if config.depth_stencil.depth_write_enable { 1 } else { 0 },
+                depthCompareOp: config.depth_stencil.depth_compare_op,
                 depthBoundsTestEnable: 0,
-                stencilTestEnable: 0,
+                stencilTestEnable: if config.depth_stencil.stencil_test_enable { 1 } else { 0 },
                 front: crate::VkStencilOpState {
                     failOp: crate::VkStencilOp::VK_STENCIL_OP_KEEP,
                     passOp: crate::VkStencilOp::VK_STENCIL_OP_KEEP,
@@ -3153,7 +3446,7 @@ impl CommandBuffer {
     /// Begin recording commands with ONE_TIME_SUBMIT flag (for temporary texture uploads, etc.)
     pub fn begin_one_time_submit(&self) -> Result<()> {
         self.begin_internal(
-            crate::VkCommandBufferUsageFlagBits::VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT as u32
+            crate::VkCommandBufferUsageFlagBits::VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT as u32,
         )
     }
 
@@ -3859,9 +4152,9 @@ impl Swapchain {
             // Prefer MAILBOX (triple buffering) if available, otherwise FIFO
             let present_mode = present_modes
                 .iter()
-                .find(|&&mode| mode == crate::VkPresentModeKHR::VK_PRESENT_MODE_MAILBOX_KHR)
+                .find(|&&mode| mode == crate::VkPresentModeKHR::VK_PRESENT_MODE_FIFO_KHR)
                 .copied()
-                .unwrap_or(crate::VkPresentModeKHR::VK_PRESENT_MODE_FIFO_KHR);
+                .unwrap_or(crate::VkPresentModeKHR::VK_PRESENT_MODE_MAILBOX_KHR);
             eprintln!(
                 "Swapchain present mode selected: {}",
                 present_mode_name(present_mode)
@@ -4566,14 +4859,14 @@ impl Swapchain {
         if slow_sync {
             self.slow_sync_log_counter = self.slow_sync_log_counter.wrapping_add(1);
             // Print immediately on first slow frame, then every 60 consecutive slow frames.
-            if self.slow_sync_log_counter == 1 || self.slow_sync_log_counter % 60 == 0 {
-                eprintln!(
-                    "Frame sync wait (sampled): fence={wait_ms:.2} ms, acquire={acquire_ms:.2} ms, frame_slot={}, image_index={}, streak={}",
-                    self.current_frame_index,
-                    self.current_image_index,
-                    self.slow_sync_log_counter,
-                );
-            }
+            // if self.slow_sync_log_counter == 1 || self.slow_sync_log_counter % 60 == 0 {
+            //     eprintln!(
+            //         "Frame sync wait (sampled): fence={wait_ms:.2} ms, acquire={acquire_ms:.2} ms, frame_slot={}, image_index={}, streak={}",
+            //         self.current_frame_index,
+            //         self.current_image_index,
+            //         self.slow_sync_log_counter,
+            //     );
+            // }
         } else {
             self.slow_sync_log_counter = 0;
         }

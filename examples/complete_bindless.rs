@@ -56,8 +56,6 @@ fn main() -> Result<(), String> {
     println!("3. Creating a test texture...");
     let texture = context
         .upload_texture(
-            &CommandBuffer::allocate(&context)
-                .map_err(|e| format!("Failed to allocate command buffer: {}", e))?,
             &vec![
                 255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
             ], // 2x2 RGBA texture

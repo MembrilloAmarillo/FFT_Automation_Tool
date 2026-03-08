@@ -3,7 +3,9 @@
 //! Press ESC to exit.
 
 use rust_and_vulkan::simple::Swapchain;
-use rust_and_vulkan::simple::{GraphicsPipeline, PipelineLayout, ShaderModule};
+use rust_and_vulkan::simple::{
+    GraphicsPipeline, GraphicsPipelineConfig, PipelineLayout, ShaderModule,
+};
 use rust_and_vulkan::{SdlContext, SdlWindow, VulkanDevice, VulkanInstance, VulkanSurface};
 use std::time::Instant;
 
@@ -78,21 +80,21 @@ fn main() -> Result<(), String> {
     println!("Pipeline layout created.");
 
     println!("Creating swapchain...");
-    let mut swapchain = Swapchain::new(&context, device.surface.as_ref().unwrap().surface, 800, 600)
-        .map_err(|e| format!("Failed to create swapchain: {}", e))?;
+    let mut swapchain =
+        Swapchain::new(&context, device.surface.as_ref().unwrap().surface, 800, 600)
+            .map_err(|e| format!("Failed to create swapchain: {}", e))?;
     println!("Swapchain created with internal double buffering.");
 
     println!("Creating graphics pipeline...");
-    let pipeline = GraphicsPipeline::new(
+    let pipeline = GraphicsPipeline::builder(
         &context,
         &vert_shader,
         &frag_shader,
         &layout,
         swapchain.render_pass(),
-        rust_and_vulkan::simple::Format::Bgra8Unorm,
-        None,
-        None,
     )
+    .with_config(GraphicsPipelineConfig::standard_opaque())
+    .build()
     .map_err(|e| format!("Failed to create graphics pipeline: {}", e))?;
     println!("Graphics pipeline created.");
 

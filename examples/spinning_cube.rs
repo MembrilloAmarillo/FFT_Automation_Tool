@@ -6,8 +6,8 @@
 use glm::ext::{look_at, perspective, rotate};
 use glm::{mat4, vec3, Mat4};
 use rust_and_vulkan::simple::{
-    CommandBuffer, Format, GraphicsPipeline, MemoryType, PipelineLayout, ShaderModule, Swapchain,
-    TextureDescriptorHeap, TextureUsage,
+    CommandBuffer, Format, GraphicsPipeline, GraphicsPipelineConfig, MemoryType, PipelineLayout,
+    RasterizationState, ShaderModule, Swapchain, TextureDescriptorHeap, TextureUsage,
 };
 use rust_and_vulkan::{SdlContext, SdlWindow, VulkanDevice, VulkanInstance, VulkanSurface};
 use std::f32::consts::PI;
@@ -163,16 +163,20 @@ fn main() -> Result<(), String> {
             .map_err(|e| format!("Failed to create swapchain: {}", e))?;
 
     println!("Creating graphics pipeline...");
-    let pipeline = GraphicsPipeline::new(
+    let pipeline = GraphicsPipeline::builder(
         &context,
         &vert_shader,
         &frag_shader,
         &layout,
         swapchain.render_pass(),
-        rust_and_vulkan::simple::Format::Bgra8Unorm,
-        None,
-        None,
     )
+    .with_config(GraphicsPipelineConfig::standard_opaque())
+    .with_rasterization(
+        RasterizationState::default()
+            .with_cull_mode(rust_and_vulkan::VkCullModeFlagBits::VK_CULL_MODE_BACK_BIT as u32)
+            .with_front_face(rust_and_vulkan::VkFrontFace::VK_FRONT_FACE_COUNTER_CLOCKWISE),
+    )
+    .build()
     .map_err(|e| format!("Failed to create graphics pipeline: {}", e))?;
 
     let mut quit = false;
@@ -271,13 +275,6 @@ fn main() -> Result<(), String> {
             .map_err(|e| format!("Failed to end frame: {}", e))?;
 
         frame_count += 1;
-        let now = Instant::now();
-        if now.duration_since(last_print_time).as_secs_f32() >= 1.0 {
-            let fps = frame_count as f32 / now.duration_since(last_print_time).as_secs_f32();
-            println!("FPS: {:.1}", fps);
-            last_print_time = now;
-            frame_count = 0;
-        }
     }
 
     context

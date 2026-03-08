@@ -3,8 +3,8 @@ use rust_and_vulkan::{SdlContext, SdlWindow, VulkanDevice, VulkanInstance, Vulka
 
 use rust_and_vulkan::simple::{
     Buffer, CommandBuffer, DescriptorPool, DescriptorSet, DescriptorSetLayout, Format,
-    GraphicsContext, GraphicsPipeline, PipelineLayout, ShaderModule, Swapchain,
-    TextureDescriptorHeap, TextureUsage,
+    GraphicsContext, GraphicsPipeline, GraphicsPipelineConfig, PipelineLayout, ShaderModule,
+    Swapchain, TextureDescriptorHeap, TextureUsage,
 };
 
 use glm as gl;
@@ -208,27 +208,13 @@ fn main() -> Result<(), String> {
     };
 
     let pipeline = if use_bindless_descriptor_buffer {
-        GraphicsPipeline::new_descriptor_buffer(
-            &context,
-            &vs,
-            &fs,
-            &layout,
-            swapchain.render_pass(),
-            Format::Bgra8Unorm,
-            None,
-            None,
-        )
+        GraphicsPipeline::builder(&context, &vs, &fs, &layout, swapchain.render_pass())
+            .with_descriptor_buffer()
+            .build()
     } else {
-        GraphicsPipeline::new(
-            &context,
-            &vs,
-            &fs,
-            &layout,
-            swapchain.render_pass(),
-            Format::Bgra8Unorm,
-            None,
-            None,
-        )
+        GraphicsPipeline::builder(&context, &vs, &fs, &layout, swapchain.render_pass())
+            .with_config(GraphicsPipelineConfig::standard_opaque())
+            .build()
     }
     .map_err(|e| e.to_string())?;
 
@@ -241,11 +227,8 @@ fn main() -> Result<(), String> {
 
     // Simple smoothed frame-rate estimator for UI display.
     let mut last_frame_time = std::time::Instant::now();
-    let mut smoothed_refresh_hz: f32 = 0.0;
-    let smoothing_alpha: f32 = 0.10;
     let mut refresh_label = String::with_capacity(64); // Pre-allocate to prevent reallocation
     refresh_label.push_str("Current refresh: --.- Hz");
-    let mut next_refresh_label_update = std::time::Instant::now();
 
     // Event + render loop
     let mut quit = false;
@@ -254,21 +237,8 @@ fn main() -> Result<(), String> {
         let frame_dt = now.duration_since(last_frame_time).as_secs_f32();
         last_frame_time = now;
 
-        let instant_refresh_hz = if frame_dt > 0.0 { 1.0 / frame_dt } else { 0.0 };
-        if smoothed_refresh_hz == 0.0 {
-            smoothed_refresh_hz = instant_refresh_hz;
-        } else {
-            smoothed_refresh_hz =
-                (1.0 - smoothing_alpha) * smoothed_refresh_hz + smoothing_alpha * instant_refresh_hz;
-        }
-
-        // Avoid generating a new label string every frame; updating a few times per
-        // second is enough for humans and prevents UI text-cache churn at very high FPS.
-        if now >= next_refresh_label_update {
-            refresh_label.clear();
-            let _ = write!(refresh_label, "Current refresh: {:.1} Hz", smoothed_refresh_hz);
-            next_refresh_label_update = now + std::time::Duration::from_millis(250);
-        }
+        refresh_label.clear();
+        let _ = write!(refresh_label, "Current refresh: {:.4} Hz", 1.0 / frame_dt);
 
         // Poll events
         unsafe {
@@ -360,7 +330,9 @@ fn main() -> Result<(), String> {
 
         if use_bindless_descriptor_buffer {
             let Some(ref heap) = bindless_heap else {
-                return Err("bindless mode selected but descriptor heap not initialized".to_string());
+                return Err(
+                    "bindless mode selected but descriptor heap not initialized".to_string()
+                );
             };
             cmd.bind_texture_heap(
                 heap,
@@ -419,17 +391,7 @@ fn main() -> Result<(), String> {
         if let Err(e) = swapchain.end_frame(&context) {
             eprintln!("end_frame failed: {e:?}");
         }
-        
-        // CRITICAL: Reset command pool EVERY FRAME with GPU synchronization
-        // This prevents memory accumulation in the command buffer pool from temporary allocations
-        // Must wait for GPU to finish before resetting
-        if let Err(e) = context.wait_idle() {
-            eprintln!("wait_idle before pool reset failed: {e:?}");
-        } else if let Err(e) = context.reset_command_pool_with_release() {
-            eprintln!("Command pool reset failed: {e:?}");
-        }
     }
-
     // Ensure device idle before drop order tears things down.
     context.wait_idle().map_err(|e| e.to_string())?;
 

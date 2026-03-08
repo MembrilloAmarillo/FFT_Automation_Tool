@@ -8,8 +8,8 @@ use egui::ClippedPrimitive;
 
 use crate::simple::{
     Buffer, BufferUsage, CommandBuffer, DescriptorSetLayout, Format, GraphicsContext,
-    GraphicsPipeline, MemoryType, PipelineLayout, ShaderModule, Texture, TextureDescriptorHeap,
-    TextureUsage,
+    GraphicsPipeline, GraphicsPipelineConfig, MemoryType, PipelineLayout, RasterizationState,
+    ShaderModule, Texture, TextureDescriptorHeap, TextureUsage,
 };
 
 #[repr(C)]
@@ -99,17 +99,17 @@ impl EguiRenderer {
         .map_err(|e| e.to_string())?;
 
         // Alpha-blend pipeline with VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT.
-        let pipeline = GraphicsPipeline::new_with_blend_descriptor_buffer(
-            context,
-            &vs,
-            &fs,
-            &layout,
-            render_pass,
-            Format::Rgba8Unorm,
-            None,
-            None,
-        )
-        .map_err(|e| e.to_string())?;
+        // UI rendering with blending enabled and culling disabled (both sides visible).
+        let ui_config = GraphicsPipelineConfig::transparent_ui().with_rasterization(
+            RasterizationState::default()
+                .with_cull_mode(crate::VkCullModeFlagBits::VK_CULL_MODE_NONE as u32),
+        );
+
+        let pipeline = GraphicsPipeline::builder(context, &vs, &fs, &layout, render_pass)
+            .with_config(ui_config)
+            .with_descriptor_buffer()
+            .build()
+            .map_err(|e| e.to_string())?;
 
         // Sampler for font atlas
         let font_sampler = context
@@ -289,7 +289,12 @@ impl EguiRenderer {
             let needed = self.scratch_indices.len() * std::mem::size_of::<u32>();
             // Only reallocate if needed grows beyond capacity OR shrinks to less than 1/4 of capacity
             // This prevents thrashing when UI size oscillates around the threshold
-            if self.index_capacity < needed || self.index_capacity > needed * 4 {                eprintln!("ALLOC: Reallocating index buffer {} -> {} bytes", self.index_capacity, needed);                self.index_capacity = (needed as f32 * 1.5) as usize;
+            if self.index_capacity < needed || self.index_capacity > needed * 4 {
+                eprintln!(
+                    "ALLOC: Reallocating index buffer {} -> {} bytes",
+                    self.index_capacity, needed
+                );
+                self.index_capacity = (needed as f32 * 1.5) as usize;
                 let buf = Buffer::new(
                     context,
                     self.index_capacity,
