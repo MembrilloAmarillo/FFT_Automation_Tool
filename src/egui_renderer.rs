@@ -167,10 +167,8 @@ impl EguiRenderer {
 
             let (width, height, rgba_bytes) = image_delta_to_rgba(&delta.image);
 
-            let cmd = CommandBuffer::allocate(context).map_err(|e| e.to_string())?;
             let texture = context
                 .upload_texture(
-                    &cmd,
                     &rgba_bytes,
                     width,
                     height,

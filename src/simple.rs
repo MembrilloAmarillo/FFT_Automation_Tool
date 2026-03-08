@@ -607,19 +607,15 @@ impl GraphicsContext {
             )?;
             staging.write(data)?;
 
-            let command_buffer = CommandBuffer::allocate(self)?;
-            command_buffer.begin()?;
-            command_buffer.copy_vk_buffer(
+            let cmd = self.begin_single_time_commands()?;
+            cmd.copy_vk_buffer(
                 staging.vk_buffer(),
                 device_buffer.vk_buffer(),
                 data.len(),
                 0,
                 0,
             )?;
-            command_buffer.end()?;
-
-            let fence = self.submit(&command_buffer)?;
-            fence.wait_forever()?;
+            self.end_single_time_commands(cmd)?;
 
             Ok(device_buffer)
         }
@@ -671,7 +667,6 @@ impl GraphicsContext {
     /// Allocates GPU-only memory and performs copy with DCC compression
     pub fn upload_texture(
         &self,
-        command_buffer: &CommandBuffer,
         data: &[u8],
         width: u32,
         height: u32,
@@ -688,24 +683,20 @@ impl GraphicsContext {
         // Copy data to staging buffer
         staging.write(data)?;
 
-        // Begin command buffer recording
-        command_buffer.begin()?;
+        // Use single-time-submit command buffer for texture upload
+        let cmd = self.begin_single_time_commands()?;
 
         // Transition texture to transfer destination
-        command_buffer.transition_to_transfer_dst(&texture);
+        cmd.transition_to_transfer_dst(&texture);
 
         // Copy from staging buffer to texture
-        command_buffer.copy_buffer_to_texture(&staging, &texture, width, height);
+        cmd.copy_buffer_to_texture(&staging, &texture, width, height);
 
         // Transition texture to shader read-only
-        command_buffer.transition_to_shader_read(&texture);
+        cmd.transition_to_shader_read(&texture);
 
-        // End command buffer
-        command_buffer.end()?;
-
-        // Submit and wait for completion
-        let fence = self.submit(command_buffer)?;
-        fence.wait_forever()?;
+        // Submit, wait, and free in one call
+        self.end_single_time_commands(cmd)?;
 
         Ok(texture)
     }
@@ -870,6 +861,41 @@ impl GraphicsContext {
             }
         }
         Ok(())
+    }
+
+    /// Begin recording a single-time-submit command buffer (typical pattern for one-off GPU work like texture uploads)
+    pub fn begin_single_time_commands(&self) -> Result<CommandBuffer> {
+        let cmd = CommandBuffer::allocate(self)?;
+        cmd.begin_one_time_submit()?;
+        Ok(cmd)
+    }
+
+    /// End recording and submit a single-time-submit command buffer, waiting for completion and freeing it
+    pub fn end_single_time_commands(&self, command_buffer: CommandBuffer) -> Result<()> {
+        command_buffer.end()?;
+        let fence = self.submit(&command_buffer)?;
+        fence.wait_forever()?;
+        drop(command_buffer); // Explicitly free before returning
+        Ok(())
+    }
+
+    /// Reset the command pool with resource release to return freed command buffers to the system.
+    /// This helps prevent memory fragmentation from temporary command buffer allocations.
+    pub fn reset_command_pool_with_release(&self) -> Result<()> {
+        unsafe {
+            let result = crate::vkResetCommandPool(
+                self.device,
+                self.command_pool,
+                crate::VkCommandPoolResetFlagBits::VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT as u32,
+            );
+            if result != crate::VkResult::VK_SUCCESS {
+                return Err(Error::Vulkan(format!(
+                    "Failed to reset command pool: {:?}",
+                    result
+                )));
+            }
+            Ok(())
+        }
     }
 
     /// Submit a command buffer to the graphics queue and return a fence
@@ -3125,17 +3151,26 @@ impl CommandBuffer {
         }
     }
 
-    /// Begin recording commands
+    /// Begin recording commands (for reusable command buffers like per-frame rendering)
     pub fn begin(&self) -> Result<()> {
+        self.begin_internal(0) // No special flags for reusable buffers
+    }
+
+    /// Begin recording commands with ONE_TIME_SUBMIT flag (for temporary texture uploads, etc.)
+    pub fn begin_one_time_submit(&self) -> Result<()> {
+        self.begin_internal(
+            crate::VkCommandBufferUsageFlagBits::VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT as u32
+        )
+    }
+
+    fn begin_internal(&self, flags: u32) -> Result<()> {
         use std::ptr;
 
         unsafe {
             let begin_info = crate::VkCommandBufferBeginInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                 pNext: ptr::null(),
-                flags:
-                    crate::VkCommandBufferUsageFlagBits::VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
-                        as u32,
+                flags,
                 pInheritanceInfo: ptr::null(),
             };
 

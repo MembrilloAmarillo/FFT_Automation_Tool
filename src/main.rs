@@ -151,7 +151,6 @@ fn main() -> Result<(), String> {
     ];
     let texture = context
         .upload_texture(
-            &CommandBuffer::allocate(&context).map_err(|e| e.to_string())?,
             &tex_pixels,
             2,
             2,
@@ -250,6 +249,7 @@ fn main() -> Result<(), String> {
     // Event + render loop
     let mut quit = false;
     while !quit {
+        
         let now = std::time::Instant::now();
         let frame_dt = now.duration_since(last_frame_time).as_secs_f32();
         last_frame_time = now;
@@ -419,6 +419,7 @@ fn main() -> Result<(), String> {
         if let Err(e) = swapchain.end_frame(&context) {
             eprintln!("end_frame failed: {e:?}");
         }
+
     }
 
     // Ensure device idle before drop order tears things down.
