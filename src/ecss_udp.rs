@@ -512,8 +512,6 @@ pub mod telecommands {
 
 /// PUS Service telemetry packet structures
 pub mod pus_services {
-    use super::*;
-
     /// PUS Service Type 3: Housekeeping Parameter Reports
     #[derive(Debug, Clone)]
     pub struct PusService3_31 {

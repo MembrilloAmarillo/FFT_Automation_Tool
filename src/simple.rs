@@ -2379,10 +2379,7 @@ impl DescriptorPool {
                 )));
             }
 
-            Ok(DescriptorSet {
-                set,
-                device: self.device,
-            })
+            Ok(DescriptorSet { set })
         }
     }
 }
@@ -2399,7 +2396,6 @@ impl Drop for DescriptorPool {
 /// A single descriptor set allocated from a descriptor pool
 pub struct DescriptorSet {
     set: crate::VkDescriptorSet,
-    device: crate::VkDevice,
 }
 
 impl DescriptorSet {
@@ -2829,31 +2825,31 @@ impl GraphicsPipelineConfig {
 }
 
 /// Builder for creating graphics pipelines with a fluent API
-pub struct GraphicsPipelineBuilder<'a> {
-    context: &'a GraphicsContext,
-    vertex_shader: &'a ShaderModule,
-    fragment_shader: &'a ShaderModule,
-    layout: &'a PipelineLayout,
+pub struct GraphicsPipelineBuilder {
+    device: crate::VkDevice,
+    vertex_shader_module: crate::VkShaderModule,
+    fragment_shader_module: crate::VkShaderModule,
+    pipeline_layout: crate::VkPipelineLayout,
     render_pass: crate::VkRenderPass,
     config: GraphicsPipelineConfig,
-    vertex_specialization: Option<&'a SpecializationConstants>,
-    fragment_specialization: Option<&'a SpecializationConstants>,
+    vertex_specialization: Option<Box<crate::VkSpecializationInfo>>,
+    fragment_specialization: Option<Box<crate::VkSpecializationInfo>>,
 }
 
-impl<'a> GraphicsPipelineBuilder<'a> {
+impl GraphicsPipelineBuilder {
     /// Create a new graphics pipeline builder
     pub fn new(
-        context: &'a GraphicsContext,
-        vertex_shader: &'a ShaderModule,
-        fragment_shader: &'a ShaderModule,
-        layout: &'a PipelineLayout,
+        context: &GraphicsContext,
+        vertex_shader: &ShaderModule,
+        fragment_shader: &ShaderModule,
+        layout: &PipelineLayout,
         render_pass: crate::VkRenderPass,
     ) -> Self {
         Self {
-            context,
-            vertex_shader,
-            fragment_shader,
-            layout,
+            device: context.device,
+            vertex_shader_module: vertex_shader.vk_module(),
+            fragment_shader_module: fragment_shader.vk_module(),
+            pipeline_layout: layout.vk_layout(),
             render_pass,
             config: GraphicsPipelineConfig::standard_opaque(),
             vertex_specialization: None,
@@ -2881,9 +2877,7 @@ impl<'a> GraphicsPipelineBuilder<'a> {
 
     /// Enable descriptor buffer support
     pub fn with_descriptor_buffer(mut self) -> Self {
-        if self.context.descriptor_buffer_supported() {
-            self.config.use_descriptor_buffer = true;
-        }
+        self.config.use_descriptor_buffer = true;
         self
     }
 
@@ -2906,32 +2900,32 @@ impl<'a> GraphicsPipelineBuilder<'a> {
     }
 
     /// Set vertex shader specialization constants
-    pub fn with_vertex_specialization(mut self, spec: &'a SpecializationConstants) -> Self {
-        self.vertex_specialization = Some(spec);
+    pub fn with_vertex_specialization(mut self, spec: &SpecializationConstants) -> Self {
+        self.vertex_specialization = spec.build().map(Box::new);
         self
     }
 
     /// Set fragment shader specialization constants
-    pub fn with_fragment_specialization(mut self, spec: &'a SpecializationConstants) -> Self {
-        self.fragment_specialization = Some(spec);
+    pub fn with_fragment_specialization(mut self, spec: &SpecializationConstants) -> Self {
+        self.fragment_specialization = spec.build().map(Box::new);
         self
     }
 
     /// Set vertex shader specialization constants (optional)
     pub fn with_vertex_specialization_opt(
         mut self,
-        spec: Option<&'a SpecializationConstants>,
+        spec: Option<&SpecializationConstants>,
     ) -> Self {
-        self.vertex_specialization = spec;
+        self.vertex_specialization = spec.and_then(|s| s.build().map(Box::new));
         self
     }
 
     /// Set fragment shader specialization constants (optional)
     pub fn with_fragment_specialization_opt(
         mut self,
-        spec: Option<&'a SpecializationConstants>,
+        spec: Option<&SpecializationConstants>,
     ) -> Self {
-        self.fragment_specialization = spec;
+        self.fragment_specialization = spec.and_then(|s| s.build().map(Box::new));
         self
     }
 
@@ -2943,11 +2937,12 @@ impl<'a> GraphicsPipelineBuilder<'a> {
             0
         };
 
+        // Call the new_internal version that takes raw Vulkan handles
         GraphicsPipeline::new_internal(
-            self.context,
-            self.vertex_shader,
-            self.fragment_shader,
-            self.layout,
+            self.device,
+            self.vertex_shader_module,
+            self.fragment_shader_module,
+            self.pipeline_layout,
             self.render_pass,
             self.vertex_specialization,
             self.fragment_specialization,
@@ -2966,13 +2961,13 @@ pub struct GraphicsPipeline {
 
 impl GraphicsPipeline {
     /// Create a new graphics pipeline builder
-    pub fn builder<'a>(
-        context: &'a GraphicsContext,
-        vertex_shader: &'a ShaderModule,
-        fragment_shader: &'a ShaderModule,
-        layout: &'a PipelineLayout,
+    pub fn builder(
+        context: &GraphicsContext,
+        vertex_shader: &ShaderModule,
+        fragment_shader: &ShaderModule,
+        layout: &PipelineLayout,
         render_pass: crate::VkRenderPass,
-    ) -> GraphicsPipelineBuilder<'a> {
+    ) -> GraphicsPipelineBuilder {
         GraphicsPipelineBuilder::new(context, vertex_shader, fragment_shader, layout, render_pass)
     }
 
@@ -3065,13 +3060,13 @@ impl GraphicsPipeline {
     }
 
     fn new_internal(
-        context: &GraphicsContext,
-        vertex_shader: &ShaderModule,
-        fragment_shader: &ShaderModule,
-        layout: &PipelineLayout,
+        device: crate::VkDevice,
+        vertex_shader_module: crate::VkShaderModule,
+        fragment_shader_module: crate::VkShaderModule,
+        pipeline_layout: crate::VkPipelineLayout,
         render_pass: crate::VkRenderPass,
-        vertex_specialization: Option<&SpecializationConstants>,
-        fragment_specialization: Option<&SpecializationConstants>,
+        vertex_specialization: Option<Box<crate::VkSpecializationInfo>>,
+        fragment_specialization: Option<Box<crate::VkSpecializationInfo>>,
         pipeline_create_flags: u32,
         config: &GraphicsPipelineConfig,
     ) -> Result<Self> {
@@ -3079,30 +3074,29 @@ impl GraphicsPipeline {
 
         unsafe {
             // Shader stage creation info
-            let vertex_specialization_info = vertex_specialization.and_then(|s| s.build());
+            // Note: vertex_specialization and fragment_specialization are now pre-built Box<VkSpecializationInfo>
             let vertex_stage = crate::VkPipelineShaderStageCreateInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                 pNext: ptr::null(),
                 flags: 0,
                 stage: crate::VkShaderStageFlagBits::VK_SHADER_STAGE_VERTEX_BIT,
-                module: vertex_shader.vk_module(),
+                module: vertex_shader_module,
                 pName: b"main\0".as_ptr() as *const i8,
-                pSpecializationInfo: vertex_specialization_info
+                pSpecializationInfo: vertex_specialization
                     .as_ref()
-                    .map_or(std::ptr::null(), |info| info as *const _),
+                    .map_or(std::ptr::null(), |info| info.as_ref() as *const _),
             };
 
-            let fragment_specialization_info = fragment_specialization.and_then(|s| s.build());
             let fragment_stage = crate::VkPipelineShaderStageCreateInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                 pNext: ptr::null(),
                 flags: 0,
                 stage: crate::VkShaderStageFlagBits::VK_SHADER_STAGE_FRAGMENT_BIT,
-                module: fragment_shader.vk_module(),
+                module: fragment_shader_module,
                 pName: b"main\0".as_ptr() as *const i8,
-                pSpecializationInfo: fragment_specialization_info
+                pSpecializationInfo: fragment_specialization
                     .as_ref()
-                    .map_or(std::ptr::null(), |info| info as *const _),
+                    .map_or(std::ptr::null(), |info| info.as_ref() as *const _),
             };
 
             let shader_stages = [vertex_stage, fragment_stage];
@@ -3264,7 +3258,7 @@ impl GraphicsPipeline {
                 pDepthStencilState: &depth_stencil,
                 pColorBlendState: &color_blending,
                 pDynamicState: &dynamic_state,
-                layout: layout.vk_layout(),
+                layout: pipeline_layout,
                 renderPass: render_pass,
                 subpass: 0,
                 basePipelineHandle: std::ptr::null_mut(),
@@ -3273,7 +3267,7 @@ impl GraphicsPipeline {
 
             let mut pipeline = std::ptr::null_mut();
             let result = crate::vkCreateGraphicsPipelines(
-                context.device,
+                device,
                 std::ptr::null_mut(),
                 1,
                 &pipeline_info,
@@ -3290,8 +3284,8 @@ impl GraphicsPipeline {
 
             Ok(GraphicsPipeline {
                 pipeline,
-                layout: layout.vk_layout(),
-                device: context.device,
+                layout: pipeline_layout,
+                device,
             })
         }
     }

@@ -20,11 +20,11 @@ const VK_EXT_DESCRIPTOR_BUFFER_NAME: &str = "VK_EXT_descriptor_buffer";
 const RAV_DISABLE_OPTIONAL_EXTENSIONS_ENV: &str = "RAV_DISABLE_OPTIONAL_EXTENSIONS";
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct DeviceCapabilities {
-    pub descriptor_buffer_supported: bool,
-    pub descriptor_buffer_capture_replay: bool,
-    pub descriptor_buffer_image_layout_ignored: bool,
-    pub descriptor_indexing_supported: bool,
+struct DeviceCapabilities {
+    descriptor_buffer_supported: bool,
+    descriptor_buffer_capture_replay: bool,
+    descriptor_buffer_image_layout_ignored: bool,
+    descriptor_indexing_supported: bool,
 }
 
 fn env_var_is_truthy(name: &str) -> bool {
@@ -483,7 +483,6 @@ pub struct VulkanDevice {
     pub present_queue: crate::VkQueue,
     pub command_pool: crate::VkCommandPool,
     pub instance: VulkanInstance,
-    pub capabilities: DeviceCapabilities,
     pub descriptor_buffer_supported: bool,
 }
 
@@ -924,7 +923,6 @@ impl VulkanDevice {
                 present_queue,
                 command_pool,
                 instance,
-                capabilities,
                 descriptor_buffer_supported: capabilities.descriptor_buffer_supported,
             })
         }
