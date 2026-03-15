@@ -389,23 +389,30 @@ impl GraphicsContext {
         memory_type: MemoryType,
         required_bits: u32,
     ) -> Result<u32> {
-        let property_flags = match memory_type {
-            MemoryType::CpuMapped => {
+        let preferred_flag_sets: &[u32] = match memory_type {
+            MemoryType::CpuMapped => &[
                 (crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT as u32)
-                    | (crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_HOST_COHERENT_BIT as u32)
-            }
-            MemoryType::GpuOnly => {
-                crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT as u32
-            }
-            MemoryType::CpuCached => {
+                    | (crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+                        as u32),
+                crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT as u32,
+            ],
+            MemoryType::GpuOnly => &[
+                crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT as u32,
+                0,
+            ],
+            MemoryType::CpuCached => &[
                 (crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT as u32)
-                    | (crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_HOST_CACHED_BIT as u32)
-            }
+                    | (crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_HOST_CACHED_BIT as u32),
+                crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT as u32,
+            ],
         };
 
-        for i in 0..self.memory_properties.memoryTypeCount {
-            // Check both property flags AND buffer requirement bits
-            if (required_bits & (1 << i)) != 0 {
+        for &property_flags in preferred_flag_sets {
+            for i in 0..self.memory_properties.memoryTypeCount {
+                if (required_bits & (1 << i)) == 0 {
+                    continue;
+                }
+
                 let properties = self.memory_properties.memoryTypes[i as usize].propertyFlags;
                 if (properties & property_flags) == property_flags {
                     return Ok(i);
@@ -413,7 +420,10 @@ impl GraphicsContext {
             }
         }
 
-        Err(Error::Unsupported)
+        Err(Error::Vulkan(format!(
+            "no compatible memory type for {:?} (required_bits={:#010x})",
+            memory_type, required_bits
+        )))
     }
 
     /// Internal allocation helper. Allocates a `VkBuffer` + `VkDeviceMemory` pair with the
@@ -1161,7 +1171,9 @@ impl GpuAllocation {
     /// Write data to the allocation
     pub fn write(&self, data: &[u8]) -> Result<()> {
         if self.cpu_ptr.is_null() {
-            return Err(Error::Unsupported);
+            return Err(Error::Vulkan(
+                "GpuAllocation::write on non-mapped allocation (GpuOnly?)".into(),
+            ));
         }
         if data.len() > self.size {
             return Err(Error::InvalidArgument);
@@ -1440,7 +1452,9 @@ impl Buffer {
     /// Write data to the buffer
     pub fn write(&self, data: &[u8]) -> Result<()> {
         if self.cpu_ptr.is_null() {
-            return Err(Error::Unsupported);
+            return Err(Error::Vulkan(
+                "Buffer::write on non-mapped buffer (GpuOnly?)".into(),
+            ));
         }
         if data.len() > self.size {
             return Err(Error::InvalidArgument);
@@ -1454,7 +1468,9 @@ impl Buffer {
     /// Write data to the buffer at a byte offset.
     pub fn write_at(&self, offset: usize, data: &[u8]) -> Result<()> {
         if self.cpu_ptr.is_null() {
-            return Err(Error::Unsupported);
+            return Err(Error::Vulkan(
+                "Buffer::write_at on non-mapped buffer (GpuOnly?)".into(),
+            ));
         }
         if offset > self.size || data.len() > (self.size - offset) {
             return Err(Error::InvalidArgument);
@@ -1606,22 +1622,16 @@ impl Texture {
             let mut requirements: crate::VkMemoryRequirements = std::mem::zeroed();
             crate::vkGetImageMemoryRequirements(context.device, image, &mut requirements);
 
-            // Find memory type (GPU-only for optimal tiling)
-            let property_flags =
-                crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT as u32;
-            let mut memory_type_index = !0u32;
-            for i in 0..context.memory_properties.memoryTypeCount {
-                let properties = context.memory_properties.memoryTypes[i as usize].propertyFlags;
-                if (properties & property_flags) == property_flags {
-                    memory_type_index = i;
-                    break;
+            // Find memory type (GPU-only for optimal tiling), respecting image's memoryTypeBits
+            let memory_type_index = match context
+                .find_compatible_memory_type(MemoryType::GpuOnly, requirements.memoryTypeBits)
+            {
+                Ok(index) => index,
+                Err(e) => {
+                    crate::vkDestroyImage(context.device, image, ptr::null());
+                    return Err(e);
                 }
-            }
-
-            if memory_type_index == !0u32 {
-                crate::vkDestroyImage(context.device, image, ptr::null());
-                return Err(Error::Unsupported);
-            }
+            };
 
             // Allocate memory
             let alloc_info = crate::VkMemoryAllocateInfo {
@@ -2592,7 +2602,9 @@ impl TextureDescriptorHeap {
                 dest_ptr,
             ) {
                 crate::vkDestroyImageView(context.device, image_view, ptr::null());
-                return Err(Error::Unsupported);
+                return Err(Error::Vulkan(
+                    "vkGetDescriptorEXT not available (VK_EXT_descriptor_buffer missing?)".into(),
+                ));
             }
 
             // Store the image view for later destruction
@@ -4185,9 +4197,9 @@ impl Swapchain {
             // Prefer MAILBOX (triple buffering) if available, otherwise FIFO
             Ok(present_modes
                 .iter()
-                .find(|&&m| m == crate::VkPresentModeKHR::VK_PRESENT_MODE_MAILBOX_KHR)
+                .find(|&&m| m == crate::VkPresentModeKHR::VK_PRESENT_MODE_FIFO_KHR)
                 .copied()
-                .unwrap_or(crate::VkPresentModeKHR::VK_PRESENT_MODE_FIFO_KHR))
+                .unwrap_or(crate::VkPresentModeKHR::VK_PRESENT_MODE_MAILBOX_KHR))
         }
     }
 
@@ -4415,26 +4427,19 @@ impl Swapchain {
                 &mut depth_requirements,
             );
 
-            // Find GPU-local memory type for depth buffer
-            let property_flags =
-                crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT as u32;
-            let mut depth_memory_type_index = !0u32;
-            for i in 0..context.memory_properties.memoryTypeCount {
-                let properties = context.memory_properties.memoryTypes[i as usize].propertyFlags;
-                if (properties & property_flags) == property_flags {
-                    depth_memory_type_index = i;
-                    break;
+            let depth_memory_type_index = match context
+                .find_compatible_memory_type(MemoryType::GpuOnly, depth_requirements.memoryTypeBits)
+            {
+                Ok(index) => index,
+                Err(e) => {
+                    crate::vkDestroyImage(context.device, depth_image, ptr::null());
+                    for &view in &image_views {
+                        crate::vkDestroyImageView(context.device, view, ptr::null());
+                    }
+                    crate::vkDestroySwapchainKHR(context.device, swapchain, ptr::null());
+                    return Err(e);
                 }
-            }
-
-            if depth_memory_type_index == !0u32 {
-                crate::vkDestroyImage(context.device, depth_image, ptr::null());
-                for &view in &image_views {
-                    crate::vkDestroyImageView(context.device, view, ptr::null());
-                }
-                crate::vkDestroySwapchainKHR(context.device, swapchain, ptr::null());
-                return Err(Error::Unsupported);
-            }
+            };
 
             // Allocate depth image memory
             let depth_alloc_info = crate::VkMemoryAllocateInfo {

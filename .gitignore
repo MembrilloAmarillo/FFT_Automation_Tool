@@ -3,3 +3,7 @@ Cargo.lock
 *.rs.bk
 /bindings.rs
 /out
+/AppDir
+/dist
+/tools
+/build

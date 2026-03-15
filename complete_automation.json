@@ -1,0 +1,62 @@
+{
+  "yamcs": {
+    "base_url": "http://localhost:8090",
+    "instance": "myproject",
+    "processor": "realtime",
+    "username": "admin",
+    "password": "admin",
+    "origin": "rust-automation"
+  },
+  "timeout_ms": 60000,
+  "stop_on_error": false,
+  "repeat_count": 0,
+  "commands": [
+    {
+      "name": "PUS_17_1",
+      "description": "System alive check",
+      "args": {},
+      "delay_ms": 500,
+      "retry_count": 1
+    },
+    {
+      "name": "PUS_8_1_EPS_OUTPUT_BUS_CHANNEL_ON",
+      "description": "Enable EPS Output Bus Channel 0",
+      "args": {
+        "Channel_ID": 0
+      },
+      "delay_ms": 1000,
+      "retry_count": 1
+    },
+    {
+      "name": "PUS_8_1_EPS_OUTPUT_BUS_CHANNEL_ON",
+      "description": "Enable EPS Output Bus Channel 2",
+      "args": {
+        "Channel_ID": 2
+      },
+      "delay_ms": 1000,
+      "retry_count": 1
+    },
+    {
+      "name": "PUS_8_1_SYSTEM_CHANGE_TIME",
+      "description": "Synchronize spacecraft time to current UTC",
+      "args": {
+        "Time": 1773305201
+      },
+      "delay_ms": 2000,
+      "retry_count": 0
+    },
+    {
+      "name": "PUS_3_33",
+      "description": "Query HK intervals for EPS System and ADCS",
+      "args": {
+        "N": 2,
+        "HK_Structure_ID": [
+          5,
+          1
+        ]
+      },
+      "delay_ms": 1500,
+      "retry_count": 0
+    }
+  ]
+}

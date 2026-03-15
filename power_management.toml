@@ -1,0 +1,69 @@
+# ECSS Spacecraft Automation - Power Management Sequence
+# Tests: EPS channel control with different channel IDs
+
+[yamcs]
+base_url = "http://localhost:8090"
+instance = "myproject"
+processor = "realtime"
+username = "admin"
+password = "admin"
+origin = "rust-automation"
+
+timeout_ms = 60000
+stop_on_error = false
+repeat_count = 0
+
+# ============================================================================
+# POWER-UP SEQUENCE
+# ============================================================================
+
+[[commands]]
+name = "PUS_17_1"
+description = "Check spacecraft alive"
+delay_ms = 500
+retry_count = 1
+
+[[commands]]
+name = "PUS_8_1_SYSTEM_CHANGE_TIME"
+description = "Synchronize spacecraft time to current UTC"
+delay_ms = 2000
+retry_count = 0
+
+[commands.args]
+Time = get_current_time()
+
+[[commands]]
+name = "PUS_8_1_EPS_OUTPUT_BUS_CHANNEL_ON"
+description = "Enable EPS Output Bus Channel 0"
+delay_ms = 1000
+retry_count = 1
+
+[commands.args]
+Channel_ID = 0
+
+[[commands]]
+name = "PUS_8_1_EPS_OUTPUT_BUS_CHANNEL_ON"
+description = "Enable EPS Output Bus Channel 1"
+delay_ms = 1000
+retry_count = 1
+
+[commands.args]
+Channel_ID = 1
+
+[[commands]]
+name = "PUS_8_1_EPS_OUTPUT_BUS_CHANNEL_ON"
+description = "Enable EPS Output Bus Channel 3"
+delay_ms = 1000
+retry_count = 1
+
+[commands.args]
+Channel_ID = 3
+
+[[commands]]
+name = "PUS_8_1_EPS_OUTPUT_BUS_CHANNEL_OFF"
+description = "Disable EPS Output Bus Channel 0"
+delay_ms = 1000
+retry_count = 1
+
+[commands.args]
+Channel_ID = 0

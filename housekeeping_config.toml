@@ -1,0 +1,113 @@
+# ECSS Spacecraft Automation - Housekeeping Collection
+# Tests: HK interval changes and HK queries with multiple structures
+
+[yamcs]
+base_url = "http://localhost:8090"
+instance = "myproject"
+processor = "realtime"
+username = "admin"
+password = "admin"
+origin = "rust-automation"
+
+[commander_udp]
+host = "127.0.0.1"
+port = 8092
+
+timeout_ms = 60000
+stop_on_error = false
+repeat_count = 0
+
+# ============================================================================
+# HOUSEKEEPING CONFIGURATION
+# ============================================================================
+
+[[commands]]
+name = "PUS_17_1"
+description = "System alive check"
+delay_ms = 500
+retry_count = 1
+
+[[commands]]
+name = "PUS_3_31"
+description = "Set HK collection intervals for EPS and ADCS"
+delay_ms = 1500
+retry_count = 1
+
+[commands.args]
+N = 2
+
+[[commands.args.PUS_3_31_Body]]
+HK_Parameter_Report_Structure_ID = 5
+Collection_Interval = 10
+
+[[commands.args.PUS_3_31_Body]]
+HK_Parameter_Report_Structure_ID = 1
+Collection_Interval = 15
+
+[[commands]]
+name = "PUS_3_33"
+description = "Query HK intervals for EPS System, Solar Panels, and Transceiver"
+delay_ms = 2000
+retry_count = 0
+
+[commands.args]
+N = 3
+HK_Structure_ID = [5, 6, 7]
+
+[[commands]]
+name = "PUS_3_31"
+description = "Update HK collection for all major subsystems"
+delay_ms = 1500
+retry_count = 1
+
+[commands.args]
+N = 4
+
+[[commands.args.PUS_3_31_Body]]
+HK_Parameter_Report_Structure_ID = 1
+Collection_Interval = 20
+
+[[commands.args.PUS_3_31_Body]]
+HK_Parameter_Report_Structure_ID = 5
+Collection_Interval = 12
+
+[[commands.args.PUS_3_31_Body]]
+HK_Parameter_Report_Structure_ID = 6
+Collection_Interval = 25
+
+[[commands.args.PUS_3_31_Body]]
+HK_Parameter_Report_Structure_ID = 7
+Collection_Interval = 30
+
+[[commands]]
+name = "PUS_3_33"
+description = "Verify final HK collection configuration"
+delay_ms = 2000
+retry_count = 0
+
+[commands.args]
+N = 4
+HK_Structure_ID = [1, 5, 6, 7]
+
+# ============================================================================
+# HK FILE RETRIEVAL
+# ============================================================================
+
+[[commands]]
+name = "COMMAND_FTP_LIST"
+description = "List housekeeping files in /flash0/hk/"
+delay_ms = 1000
+retry_count = 2
+
+[commands.args]
+path = "/flash0/hk/"
+
+[[commands]]
+name = "COMMAND_FTP_DOWNLOAD"
+description = "Download all housekeeping files from /flash0/hk/"
+delay_ms = 1500
+retry_count = 2
+
+[commands.args]
+remote = "/flash0/hk/*"
+local = "./hk/"

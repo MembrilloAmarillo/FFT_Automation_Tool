@@ -7,9 +7,9 @@
 use egui::ClippedPrimitive;
 
 use crate::simple::{
-    Buffer, BufferUsage, CommandBuffer, DescriptorSetLayout, Format, GraphicsContext,
-    GraphicsPipeline, GraphicsPipelineConfig, MemoryType, PipelineLayout, RasterizationState,
-    ShaderModule, Texture, TextureDescriptorHeap, TextureUsage,
+    Buffer, BufferUsage, CommandBuffer, DescriptorPool, DescriptorSet, DescriptorSetLayout, Format,
+    GraphicsContext, GraphicsPipeline, GraphicsPipelineConfig, MemoryType, PipelineLayout,
+    RasterizationState, ShaderModule, Texture, TextureDescriptorHeap, TextureUsage,
 };
 
 #[repr(C)]
@@ -55,14 +55,18 @@ pub struct EguiRenderer {
     pipeline: GraphicsPipeline,
     layout: PipelineLayout,
     device: crate::VkDevice,
-    // Font texture + bindless descriptor heap
+    use_descriptor_buffer: bool,
+    use_mapped_ui_buffers: bool,
+    // Font texture + descriptor binding state
     font_texture: Option<Texture>,
     font_texture_width: u32,
     font_texture_height: u32,
     font_sampler: crate::VkSampler,
-    font_heap: TextureDescriptorHeap,
+    font_heap: Option<TextureDescriptorHeap>,
+    _font_descriptor_pool: Option<DescriptorPool>,
+    font_descriptor_set: Option<DescriptorSet>,
     font_texture_index: u32,
-    font_heap_written: bool,
+    font_descriptor_ready: bool,
     // Geometry buffers
     vertex_buffer: Option<Buffer>,
     index_buffer: Option<Buffer>,
@@ -87,14 +91,18 @@ impl EguiRenderer {
         let vs = ShaderModule::new(context, &vert_spv).map_err(|e| e.to_string())?;
         let fs = ShaderModule::new(context, &frag_spv).map_err(|e| e.to_string())?;
 
-        // Descriptor set layout: bindless combined-image-sampler array (descriptor-buffer compatible).
-        let set_layout =
-            DescriptorSetLayout::new_bindless_textures(context, 1).map_err(|e| e.to_string())?;
+        let use_descriptor_buffer = context.descriptor_buffer_supported();
+
+        let set_layout = if use_descriptor_buffer {
+            DescriptorSetLayout::new_bindless_textures(context, 1).map_err(|e| e.to_string())?
+        } else {
+            DescriptorSetLayout::new_texture_array(context, 1).map_err(|e| e.to_string())?
+        };
 
         // Pipeline layout: descriptor set 0 + push constants (20 bytes).
         let layout = PipelineLayout::with_descriptor_set_layouts_and_push_size(
             context,
-            &[set_layout],
+            std::slice::from_ref(&set_layout),
             crate::simple::SHADER_STAGE_VERTEX | crate::simple::SHADER_STAGE_FRAGMENT,
             std::mem::size_of::<UIPushConstants>() as u32,
         )
@@ -107,32 +115,49 @@ impl EguiRenderer {
                 .with_cull_mode(crate::VkCullModeFlagBits::VK_CULL_MODE_NONE as u32),
         );
 
-        let pipeline = GraphicsPipeline::builder(context, &vs, &fs, &layout, render_pass)
-            .with_config(ui_config)
-            .with_descriptor_buffer()
-            .build()
-            .map_err(|e| e.to_string())?;
+        let mut pipeline_builder =
+            GraphicsPipeline::builder(context, &vs, &fs, &layout, render_pass)
+                .with_config(ui_config);
+        if use_descriptor_buffer {
+            pipeline_builder = pipeline_builder.with_descriptor_buffer();
+        }
+        let pipeline = pipeline_builder.build().map_err(|e| e.to_string())?;
 
         // Sampler for font atlas
         let font_sampler = context
             .create_default_sampler()
             .map_err(|e| e.to_string())?;
 
-        // Descriptor heap: capacity 1 (only the font atlas).
-        let mut font_heap = TextureDescriptorHeap::new(context, 1).map_err(|e| e.to_string())?;
-        let font_texture_index = font_heap.allocate().map_err(|e| e.to_string())?;
+        let (font_heap, font_descriptor_pool, font_descriptor_set, font_texture_index) =
+            if use_descriptor_buffer {
+                let mut font_heap =
+                    TextureDescriptorHeap::new(context, 1).map_err(|e| e.to_string())?;
+                let font_texture_index = font_heap.allocate().map_err(|e| e.to_string())?;
+                (Some(font_heap), None, None, font_texture_index)
+            } else {
+                let descriptor_pool =
+                    DescriptorPool::new(context, 1, 1).map_err(|e| e.to_string())?;
+                let descriptor_set = descriptor_pool
+                    .allocate(&set_layout)
+                    .map_err(|e| e.to_string())?;
+                (None, Some(descriptor_pool), Some(descriptor_set), 0)
+            };
 
         Ok(EguiRenderer {
             pipeline,
             layout,
             device: context.vk_device(),
+            use_descriptor_buffer,
+            use_mapped_ui_buffers: true,
             font_texture: None,
             font_texture_width: 0,
             font_texture_height: 0,
             font_sampler,
             font_heap,
+            _font_descriptor_pool: font_descriptor_pool,
+            font_descriptor_set,
             font_texture_index,
-            font_heap_written: false,
+            font_descriptor_ready: false,
             vertex_buffer: None,
             index_buffer: None,
             vertex_capacity: 0,
@@ -141,6 +166,62 @@ impl EguiRenderer {
             scratch_indices: Vec::new(),
             draws: Vec::new(),
         })
+    }
+
+    fn create_ui_vertex_buffer(
+        &mut self,
+        context: &GraphicsContext,
+        needed: usize,
+    ) -> Result<Buffer, String> {
+        if self.use_mapped_ui_buffers {
+            match Buffer::new(
+                context,
+                needed.max(1),
+                BufferUsage::VERTEX,
+                MemoryType::CpuMapped,
+            ) {
+                Ok(buf) => return Ok(buf),
+                Err(crate::simple::Error::Unsupported) => {
+                    self.use_mapped_ui_buffers = false;
+                }
+                Err(e) => return Err(format!("vertex buffer: {e}")),
+            }
+        }
+
+        Buffer::from_data(
+            context,
+            BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+            as_bytes(&self.scratch_vertices),
+        )
+        .map_err(|e| format!("vertex upload buffer: {e}"))
+    }
+
+    fn create_ui_index_buffer(
+        &mut self,
+        context: &GraphicsContext,
+        needed: usize,
+    ) -> Result<Buffer, String> {
+        if self.use_mapped_ui_buffers {
+            match Buffer::new(
+                context,
+                needed.max(1),
+                BufferUsage::INDEX,
+                MemoryType::CpuMapped,
+            ) {
+                Ok(buf) => return Ok(buf),
+                Err(crate::simple::Error::Unsupported) => {
+                    self.use_mapped_ui_buffers = false;
+                }
+                Err(e) => return Err(format!("index buffer: {e}")),
+            }
+        }
+
+        Buffer::from_data(
+            context,
+            BufferUsage::INDEX | BufferUsage::TRANSFER_DST,
+            as_bytes(&self.scratch_indices),
+        )
+        .map_err(|e| format!("index upload buffer: {e}"))
     }
 
     /// Upload (or re-upload) the egui texture atlas.
@@ -157,7 +238,7 @@ impl EguiRenderer {
                 self.font_texture = None;
                 self.font_texture_width = 0;
                 self.font_texture_height = 0;
-                self.font_heap_written = false;
+                self.font_descriptor_ready = false;
             }
         }
 
@@ -189,15 +270,25 @@ impl EguiRenderer {
                     .map_err(|e| e.to_string())?;
 
                 // Write (or re-write) the descriptor in the heap.
-                self.font_heap
-                    .write_descriptor(
-                        context,
-                        self.font_texture_index,
-                        &texture,
-                        self.font_sampler,
-                    )
-                    .map_err(|e| e.to_string())?;
-                self.font_heap_written = true;
+                if self.use_descriptor_buffer {
+                    self.font_heap
+                        .as_mut()
+                        .ok_or_else(|| "missing font descriptor heap".to_string())?
+                        .write_descriptor(
+                            context,
+                            self.font_texture_index,
+                            &texture,
+                            self.font_sampler,
+                        )
+                        .map_err(|e| e.to_string())?;
+                } else {
+                    self.font_descriptor_set
+                        .as_ref()
+                        .ok_or_else(|| "missing font descriptor set".to_string())?
+                        .write_textures(context, &[&texture], self.font_sampler)
+                        .map_err(|e| e.to_string())?;
+                }
+                self.font_descriptor_ready = true;
 
                 self.font_texture_width = width;
                 self.font_texture_height = height;
@@ -348,23 +439,16 @@ impl EguiRenderer {
 
         if !self.scratch_vertices.is_empty() {
             let needed = self.scratch_vertices.len() * std::mem::size_of::<UIVertex>();
-            // Only reallocate if needed grows beyond capacity OR shrinks to less than 1/4 of capacity
-            // This prevents thrashing when UI size oscillates around the threshold
-            if self.vertex_capacity < needed || self.vertex_capacity > needed * 4 {
-                // Wait for device idle before destroying old buffer
-                unsafe {
-                    crate::vkDeviceWaitIdle(self.device);
-                }
+            // Grow-only strategy: avoids vkDeviceWaitIdle stalls when UI size oscillates.
+            // On drivers without CPU-mapped compatible memory for these buffers, fall back
+            // to recreating/uploading GPU buffers instead of failing startup.
+            if self.vertex_capacity < needed || !self.use_mapped_ui_buffers {
                 self.vertex_capacity = (needed as f32 * 1.5) as usize;
-                let buf = Buffer::new(
-                    context,
-                    self.vertex_capacity,
-                    BufferUsage::VERTEX,
-                    MemoryType::CpuMapped,
-                )
-                .map_err(|e| format!("vertex buffer: {e}"))?;
-                buf.write(as_bytes(&self.scratch_vertices))
-                    .map_err(|e| format!("write vertices: {e}"))?;
+                let buf = self.create_ui_vertex_buffer(context, self.vertex_capacity)?;
+                if buf.cpu_ptr().is_some() {
+                    buf.write(as_bytes(&self.scratch_vertices))
+                        .map_err(|e| format!("write vertices: {e}"))?;
+                }
                 self.vertex_buffer = Some(buf);
             } else if let Some(ref buf) = self.vertex_buffer {
                 buf.write(as_bytes(&self.scratch_vertices))
@@ -374,27 +458,16 @@ impl EguiRenderer {
 
         if !self.scratch_indices.is_empty() {
             let needed = self.scratch_indices.len() * std::mem::size_of::<u32>();
-            // Only reallocate if needed grows beyond capacity OR shrinks to less than 1/4 of capacity
-            // This prevents thrashing when UI size oscillates around the threshold
-            if self.index_capacity < needed || self.index_capacity > needed * 4 {
-                eprintln!(
-                    "ALLOC: Reallocating index buffer {} -> {} bytes",
-                    self.index_capacity, needed
-                );
-                // Wait for device idle before destroying old buffer
-                unsafe {
-                    crate::vkDeviceWaitIdle(self.device);
-                }
+            // Grow-only strategy: avoids vkDeviceWaitIdle stalls when UI size oscillates.
+            // On drivers without CPU-mapped compatible memory for these buffers, fall back
+            // to recreating/uploading GPU buffers instead of failing startup.
+            if self.index_capacity < needed || !self.use_mapped_ui_buffers {
                 self.index_capacity = (needed as f32 * 1.5) as usize;
-                let buf = Buffer::new(
-                    context,
-                    self.index_capacity,
-                    BufferUsage::INDEX,
-                    MemoryType::CpuMapped,
-                )
-                .map_err(|e| format!("index buffer: {e}"))?;
-                buf.write(as_bytes(&self.scratch_indices))
-                    .map_err(|e| format!("write indices: {e}"))?;
+                let buf = self.create_ui_index_buffer(context, self.index_capacity)?;
+                if buf.cpu_ptr().is_some() {
+                    buf.write(as_bytes(&self.scratch_indices))
+                        .map_err(|e| format!("write indices: {e}"))?;
+                }
                 self.index_buffer = Some(buf);
             } else if let Some(ref buf) = self.index_buffer {
                 buf.write(as_bytes(&self.scratch_indices))
@@ -415,19 +488,31 @@ impl EguiRenderer {
             return Ok(());
         }
 
-        if !self.font_heap_written {
+        if !self.font_descriptor_ready {
             return Ok(());
         }
 
         cmd.bind_pipeline(&self.pipeline);
 
-        // Bind font texture heap via descriptor buffer (set=0)
-        cmd.bind_texture_heap(
-            &self.font_heap,
-            &self.layout,
-            0,
-            crate::VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS,
-        );
+        if self.use_descriptor_buffer {
+            cmd.bind_texture_heap(
+                self.font_heap
+                    .as_ref()
+                    .ok_or_else(|| "missing font descriptor heap".to_string())?,
+                &self.layout,
+                0,
+                crate::VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS,
+            );
+        } else {
+            cmd.bind_descriptor_sets(
+                &self.layout,
+                0,
+                &[self
+                    .font_descriptor_set
+                    .as_ref()
+                    .ok_or_else(|| "missing font descriptor set".to_string())?],
+            );
+        }
 
         let pc = UIPushConstants {
             vertex_ptr: self.vertex_buffer.as_ref().unwrap().device_address(),

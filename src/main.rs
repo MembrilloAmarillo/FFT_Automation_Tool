@@ -1,17 +1,50 @@
 use rust_and_vulkan::automation::AutomationFileLoader;
+use rust_and_vulkan::ecss_automation::{ExecutionEvent, ExecutionStats};
 use rust_and_vulkan::{EguiManager, EguiRenderer};
 use rust_and_vulkan::{SdlContext, SdlWindow, VulkanDevice, VulkanInstance, VulkanSurface};
 
 use rust_and_vulkan::simple::{
-    Buffer, CommandBuffer, DescriptorPool, DescriptorSet, DescriptorSetLayout, Format,
-    GraphicsContext, GraphicsPipeline, GraphicsPipelineConfig, PipelineLayout, ShaderModule,
-    Swapchain, TextureDescriptorHeap, TextureUsage,
+    Buffer, BufferUsage, CommandBuffer, DescriptorPool, DescriptorSet, DescriptorSetLayout, Format,
+    GraphicsContext, GraphicsPipeline, GraphicsPipelineConfig, MemoryType, PipelineLayout,
+    ShaderModule, Swapchain, TextureDescriptorHeap, TextureUsage,
 };
 
 use glm as gl;
 use std::fmt::Write as _;
+use std::net::UdpSocket;
 
-fn render_virtualized_code_view(ui: &mut egui::Ui, content: &str, line_starts: &[usize]) {
+fn send_commander_udp(target: &str, command_line: &str) -> Result<String, String> {
+    let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("bind failed: {}", e))?;
+    socket
+        .set_read_timeout(Some(std::time::Duration::from_millis(600)))
+        .map_err(|e| format!("set_read_timeout failed: {}", e))?;
+
+    socket
+        .send_to(command_line.as_bytes(), target)
+        .map_err(|e| format!("send_to failed: {}", e))?;
+
+    let mut buf = [0u8; 512];
+    match socket.recv_from(&mut buf) {
+        Ok((n, _)) => {
+            let reply = String::from_utf8_lossy(&buf[..n]).to_string();
+            Ok(reply)
+        }
+        Err(e)
+            if e.kind() == std::io::ErrorKind::WouldBlock
+                || e.kind() == std::io::ErrorKind::TimedOut =>
+        {
+            Ok("sent (no immediate reply)".to_string())
+        }
+        Err(e) => Err(format!("recv_from failed: {}", e)),
+    }
+}
+
+fn render_virtualized_code_view(
+    ui: &mut egui::Ui,
+    content: &str,
+    line_starts: &[usize],
+    highlight_command_name: Option<&str>,
+) {
     let total_lines = line_starts.len().saturating_sub(1);
     if total_lines == 0 {
         ui.label("(empty file)");
@@ -34,11 +67,27 @@ fn render_virtualized_code_view(ui: &mut egui::Ui, content: &str, line_starts: &
 
                 ui.horizontal(|ui| {
                     ui.colored_label(egui::Color32::GRAY, format!("{:>7} ", row + 1));
-                    ui.monospace(line);
+                    let highlight_line = highlight_command_name
+                        .map(|name| !name.is_empty() && line.contains(name))
+                        .unwrap_or(false);
+                    if highlight_line {
+                        ui.label(
+                            egui::RichText::new(line)
+                                .monospace()
+                                .background_color(egui::Color32::from_rgb(255, 245, 170)),
+                        );
+                    } else {
+                        ui.monospace(line);
+                    }
                 });
             }
         },
     );
+}
+
+enum AutomationThreadMessage {
+    Progress(ExecutionEvent),
+    Finished(Result<ExecutionStats, String>),
 }
 
 #[repr(C)]
@@ -95,6 +144,15 @@ fn main() -> Result<(), String> {
     }
     let window = SdlWindow::new("Rotating Square (bindless textures + fallback)", 800, 600)?;
 
+    // SDL3 requires explicit text-input activation for reliable TEXT_INPUT events.
+    // Without this, egui text boxes may not receive typed characters.
+    unsafe {
+        let ok = rust_and_vulkan::SDL_StartTextInput(window.window);
+        if !ok {
+            eprintln!("Warning: SDL_StartTextInput failed");
+        }
+    }
+
     // Instance + Surface + Device
     let instance = VulkanInstance::create(&sdl, &window)?;
     let surface = VulkanSurface::create(&window, &instance)?;
@@ -112,10 +170,28 @@ fn main() -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
-    // Create swapchain
+    // Create swapchain using actual drawable pixel size (important for HiDPI).
     let surface_khr = device.surface.as_ref().expect("surface expected").surface;
-    let mut swapchain =
-        Swapchain::new(&context, surface_khr, 800, 600).map_err(|e| e.to_string())?;
+    let mut drawable_width = 0i32;
+    let mut drawable_height = 0i32;
+    unsafe {
+        rust_and_vulkan::SDL_GetWindowSizeInPixels(
+            window.window,
+            &mut drawable_width,
+            &mut drawable_height,
+        );
+    }
+    if drawable_width <= 0 || drawable_height <= 0 {
+        drawable_width = 800;
+        drawable_height = 600;
+    }
+    let mut swapchain = Swapchain::new(
+        &context,
+        surface_khr,
+        drawable_width as u32,
+        drawable_height as u32,
+    )
+    .map_err(|e| e.to_string())?;
 
     // Shaders
     let vert_spv = load_spirv_u32("shaders/simple_square.vert.spv")?;
@@ -167,13 +243,40 @@ fn main() -> Result<(), String> {
     let vertex_buffer = Buffer::vertex_buffer(&context, &square_vertices)
         .map_err(|e| format!("Failed to create square vertex buffer: {}", e))?;
 
-    // Create a buffer for MVP matrix (will be updated each frame)
-    let mpv_buffer = {
+    // MVP buffer strategy (optimal for discrete + compatible with old fallback GPUs):
+    // - `mpv_buffer`: device-local GPU buffer used by shaders via buffer device address.
+    // - `mpv_upload_buffer`: CPU-mapped transfer source updated each frame.
+    // Each frame we copy upload -> device-local before drawing.
+    let (mpv_buffer, mpv_upload_buffer) = {
         let mpv = MPV_PushConstants {
             mpv: num_traits::one(), // identity initially
         };
-        Buffer::from_device_address(&context, &[mpv])
-            .map_err(|e| format!("Failed to create MPV buffer: {}", e))?
+        let size = std::mem::size_of::<MPV_PushConstants>();
+
+        let gpu_buf = Buffer::new(
+            &context,
+            size,
+            BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+            MemoryType::GpuOnly,
+        )
+        .map_err(|e| format!("Failed to create GPU MPV buffer: {}", e))?;
+
+        let upload_buf = Buffer::new(
+            &context,
+            size,
+            BufferUsage::TRANSFER_SRC,
+            MemoryType::CpuMapped,
+        )
+        .map_err(|e| format!("Failed to create MPV upload buffer: {}", e))?;
+
+        let bytes = unsafe {
+            std::slice::from_raw_parts(&mpv as *const MPV_PushConstants as *const u8, size)
+        };
+        upload_buf
+            .write(bytes)
+            .map_err(|e| format!("Failed to initialize MPV upload buffer: {}", e))?;
+
+        (gpu_buf, upload_buf)
     };
 
     // Create a tiny 2x2 RGBA texture (used for both bindless and fallback paths).
@@ -269,6 +372,28 @@ fn main() -> Result<(), String> {
     let mut filter_last_edit_at: Option<std::time::Instant> = None;
     let filter_debounce = std::time::Duration::from_millis(250);
 
+    // Automation execution state
+    let mut automation_executing = false;
+    let mut automation_stats: Option<ExecutionStats> = None;
+    let mut automation_error: Option<String> = None;
+    let mut automation_current_command: Option<String> = None;
+    let mut automation_progress_label = String::new();
+    let mut automation_log: Vec<String> = Vec::new();
+    // Channel through which a background execution thread reports its result
+    let mut automation_rx: Option<std::sync::mpsc::Receiver<AutomationThreadMessage>> = None;
+
+    // Commander UDP UI state
+    let mut commander_show_window = false;
+    let mut commander_target_host = "127.0.0.1".to_string();
+    let mut commander_target_port: u16 = 8092;
+    let mut ftp_list_path = "/".to_string();
+    let mut ftp_download_remote = "/remote/file.bin".to_string();
+    let mut ftp_download_local = "./downloaded_file.bin".to_string();
+    let mut delete_file_path = "/remote/file.bin".to_string();
+    let mut delete_all_prefix = "/remote/folder".to_string();
+    let mut commander_status = String::new();
+    let mut commander_log: Vec<String> = Vec::new();
+
     // Event + render loop
     let mut quit = false;
     let mut window_resized = false;
@@ -285,11 +410,89 @@ fn main() -> Result<(), String> {
         }
 
         automation_loader.poll_file_load();
+
+        // Poll background automation thread for results
+        if automation_executing {
+            if let Some(rx) = &automation_rx {
+                let mut finished_result: Option<Result<ExecutionStats, String>> = None;
+                while let Ok(msg) = rx.try_recv() {
+                    match msg {
+                        AutomationThreadMessage::Progress(event) => match event {
+                            ExecutionEvent::CommandStarted {
+                                index,
+                                total,
+                                name,
+                                description,
+                            } => {
+                                automation_current_command = Some(name.clone());
+                                automation_progress_label = if description.trim().is_empty() {
+                                    format!("Running {}/{}: {}", index, total, name)
+                                } else {
+                                    format!(
+                                        "Running {}/{}: {} — {}",
+                                        index, total, name, description
+                                    )
+                                };
+                                automation_log
+                                    .push(format!("▶ {}/{} START {}", index, total, name));
+                            }
+                            ExecutionEvent::CommandSucceeded {
+                                index,
+                                total,
+                                name,
+                                elapsed_ms,
+                            } => {
+                                automation_log.push(format!(
+                                    "✓ {}/{} OK {} ({} ms)",
+                                    index, total, name, elapsed_ms
+                                ));
+                            }
+                            ExecutionEvent::CommandFailed {
+                                index,
+                                total,
+                                name,
+                                error,
+                            } => {
+                                automation_log.push(format!(
+                                    "✗ {}/{} FAIL {} — {}",
+                                    index, total, name, error
+                                ));
+                            }
+                        },
+                        AutomationThreadMessage::Finished(result) => {
+                            finished_result = Some(result);
+                        }
+                    }
+                }
+
+                if let Some(result) = finished_result {
+                    automation_executing = false;
+                    automation_rx = None;
+                    automation_current_command = None;
+                    match result {
+                        Ok(stats) => automation_stats = Some(stats),
+                        Err(e) => automation_error = Some(e),
+                    }
+                }
+
+                if automation_log.len() > 200 {
+                    let remove_count = automation_log.len() - 200;
+                    automation_log.drain(0..remove_count);
+                }
+            }
+        }
+
         if let Some(last_edit) = filter_last_edit_at {
             if now.duration_since(last_edit) >= filter_debounce {
                 automation_loader.refresh_files();
                 filter_last_edit_at = None;
             }
+        }
+
+        let mut input_pixels_per_point =
+            unsafe { rust_and_vulkan::SDL_GetWindowDisplayScale(window.window) };
+        if !input_pixels_per_point.is_finite() || input_pixels_per_point <= 0.0 {
+            input_pixels_per_point = 1.0;
         }
 
         // Poll events
@@ -307,7 +510,7 @@ fn main() -> Result<(), String> {
                     window_resized = true;
                 }
                 // Feed events to egui
-                egui_manager.handle_event(&event);
+                egui_manager.handle_event(&event, input_pixels_per_point);
             }
         }
 
@@ -361,7 +564,7 @@ fn main() -> Result<(), String> {
         let extent = swapchain.extent();
         let cmd: &CommandBuffer = swapchain.current_command_buffer();
 
-        // Begin egui frame
+        // Begin egui frame in framebuffer pixel space.
         egui_manager.begin_frame(extent.width as f32, extent.height as f32);
 
         // Build UI panels
@@ -393,11 +596,148 @@ fn main() -> Result<(), String> {
                     ui.label(egui::RichText::new(refresh_label.as_str()));
                 });
 
+            if commander_show_window {
+                egui::Window::new("Commander UDP")
+                    .open(&mut commander_show_window)
+                    .default_width(520.0)
+                    .default_height(460.0)
+                    .show(&egui_manager.ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Host:");
+                            ui.text_edit_singleline(&mut commander_target_host);
+                            ui.label("Port:");
+                            ui.add(
+                                egui::DragValue::new(&mut commander_target_port).range(1..=65535),
+                            );
+                        });
+
+                        let target =
+                            format!("{}:{}", commander_target_host.trim(), commander_target_port);
+
+                        ui.separator();
+                        ui.heading("Actions");
+
+                        if ui.button("HPC_SEND").clicked() {
+                            let cmd = "HPC_SEND".to_string();
+                            match send_commander_udp(&target, &cmd) {
+                                Ok(reply) => {
+                                    commander_status = format!("{} -> {}", cmd, reply);
+                                    commander_log.push(commander_status.clone());
+                                }
+                                Err(e) => {
+                                    commander_status = format!("{} -> ERROR {}", cmd, e);
+                                    commander_log.push(commander_status.clone());
+                                }
+                            }
+                        }
+
+                        ui.separator();
+                        ui.label("FTP_LIST <path>");
+                        ui.horizontal(|ui| {
+                            ui.text_edit_singleline(&mut ftp_list_path);
+                            if ui.button("Send FTP_LIST").clicked() {
+                                let cmd = format!("FTP_LIST {}", ftp_list_path.trim());
+                                match send_commander_udp(&target, &cmd) {
+                                    Ok(reply) => {
+                                        commander_status = format!("{} -> {}", cmd, reply);
+                                        commander_log.push(commander_status.clone());
+                                    }
+                                    Err(e) => {
+                                        commander_status = format!("{} -> ERROR {}", cmd, e);
+                                        commander_log.push(commander_status.clone());
+                                    }
+                                }
+                            }
+                        });
+
+                        ui.separator();
+                        ui.label("FTP_DOWNLOAD <remote> <local>");
+                        ui.text_edit_singleline(&mut ftp_download_remote);
+                        ui.text_edit_singleline(&mut ftp_download_local);
+                        if ui.button("Send FTP_DOWNLOAD").clicked() {
+                            let cmd = format!(
+                                "FTP_DOWNLOAD {} {}",
+                                ftp_download_remote.trim(),
+                                ftp_download_local.trim()
+                            );
+                            match send_commander_udp(&target, &cmd) {
+                                Ok(reply) => {
+                                    commander_status = format!("{} -> {}", cmd, reply);
+                                    commander_log.push(commander_status.clone());
+                                }
+                                Err(e) => {
+                                    commander_status = format!("{} -> ERROR {}", cmd, e);
+                                    commander_log.push(commander_status.clone());
+                                }
+                            }
+                        }
+
+                        ui.separator();
+                        ui.label("DELETE_FILE <path>");
+                        ui.horizontal(|ui| {
+                            ui.text_edit_singleline(&mut delete_file_path);
+                            if ui.button("Send DELETE_FILE").clicked() {
+                                let cmd = format!("DELETE_FILE {}", delete_file_path.trim());
+                                match send_commander_udp(&target, &cmd) {
+                                    Ok(reply) => {
+                                        commander_status = format!("{} -> {}", cmd, reply);
+                                        commander_log.push(commander_status.clone());
+                                    }
+                                    Err(e) => {
+                                        commander_status = format!("{} -> ERROR {}", cmd, e);
+                                        commander_log.push(commander_status.clone());
+                                    }
+                                }
+                            }
+                        });
+
+                        ui.separator();
+                        ui.label("DELETE_ALL <prefix>");
+                        ui.horizontal(|ui| {
+                            ui.text_edit_singleline(&mut delete_all_prefix);
+                            if ui.button("Send DELETE_ALL").clicked() {
+                                let cmd = format!("DELETE_ALL {}", delete_all_prefix.trim());
+                                match send_commander_udp(&target, &cmd) {
+                                    Ok(reply) => {
+                                        commander_status = format!("{} -> {}", cmd, reply);
+                                        commander_log.push(commander_status.clone());
+                                    }
+                                    Err(e) => {
+                                        commander_status = format!("{} -> ERROR {}", cmd, e);
+                                        commander_log.push(commander_status.clone());
+                                    }
+                                }
+                            }
+                        });
+
+                        if commander_log.len() > 200 {
+                            let remove_count = commander_log.len() - 200;
+                            commander_log.drain(0..remove_count);
+                        }
+
+                        ui.separator();
+                        if !commander_status.is_empty() {
+                            ui.label(format!("Status: {}", commander_status));
+                        }
+
+                        egui::CollapsingHeader::new("UDP Log")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                egui::ScrollArea::vertical()
+                                    .max_height(120.0)
+                                    .show(ui, |ui| {
+                                        for line in commander_log.iter().rev().take(20) {
+                                            ui.monospace(line);
+                                        }
+                                    });
+                            });
+                    });
+            }
+
             // Handle automation UI interactions first (without borrowing automation_loader in closures)
             let mut should_navigate_up = false;
             let mut should_refresh = false;
             let mut file_to_load: Option<std::path::PathBuf> = None;
-            let mut should_close_code_display = false;
 
             // Automation File Browser Window
             if automation_loader.show_browser {
@@ -487,38 +827,177 @@ fn main() -> Result<(), String> {
             if automation_loader.show_code_display {
                 // Pre-capture values to avoid borrow conflicts
                 let file_name = automation_loader.current_file_name();
+                let file_content = automation_loader.file_content.clone();
+                let can_execute = file_name
+                    .as_ref()
+                    .map(|n| n.ends_with(".toml") || n.ends_with(".json"))
+                    .unwrap_or(false);
 
+                let mut window_open = true;
                 egui::Window::new("Code Display")
-                    .open(&mut automation_loader.show_code_display)
-                    .default_width(600.0)
-                    .default_height(500.0)
+                    .open(&mut window_open)
+                    .default_width(700.0)
+                    .default_height(600.0)
                     .vscroll(false)
                     .show(&egui_manager.ctx, |ui| {
-                        if let Some(name) = &file_name {
-                            ui.heading(format!("📄 {}", name));
-                        }
+                        ui.vertical(|ui| {
+                            if let Some(name) = &file_name {
+                                ui.heading(format!("📄 {}", name));
+                            }
+                            ui.separator();
 
-                        ui.separator();
+                            // Keep code view stable during resize by allocating a fixed portion
+                            // of the remaining space and keeping controls below it.
+                            let code_height = (ui.available_height() * 0.60).max(120.0);
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(ui.available_width(), code_height),
+                                egui::Layout::top_down(egui::Align::LEFT),
+                                |ui| {
+                                    if automation_loader.is_loading_file {
+                                        ui.label("Loading file…");
+                                    } else if let (Some(content), Some(line_starts)) = (
+                                        automation_loader.file_content.as_deref(),
+                                        automation_loader.file_line_starts.as_deref(),
+                                    ) {
+                                        render_virtualized_code_view(
+                                            ui,
+                                            content,
+                                            line_starts,
+                                            automation_current_command.as_deref(),
+                                        );
+                                    } else {
+                                        ui.label("No file loaded");
+                                    }
+                                },
+                            );
 
-                        if automation_loader.is_loading_file {
-                            ui.label("Loading file...");
-                        } else if let (Some(content), Some(line_starts)) = (
-                            automation_loader.file_content.as_deref(),
-                            automation_loader.file_line_starts.as_deref(),
-                        ) {
-                            render_virtualized_code_view(ui, content, line_starts);
-                        } else {
-                            ui.label("No file loaded");
-                        }
+                            ui.separator();
 
-                        if ui.button("Close").clicked() {
-                            should_close_code_display = true;
-                        }
+                            ui.horizontal(|ui| {
+                                if can_execute {
+                                    let running = automation_executing;
+                                    let btn_text = if running {
+                                        "⏳ Running…"
+                                    } else {
+                                        "▶ Run Automation"
+                                    };
+                                    if ui
+                                        .add_enabled(!running, egui::Button::new(btn_text))
+                                        .clicked()
+                                    {
+                                        if let (Some(name), Some(content)) = (&file_name, &file_content)
+                                        {
+                                            let parse_result = if name.ends_with(".toml") {
+                                                rust_and_vulkan::ecss_automation::AutomationEngine::from_toml_str(content)
+                                            } else {
+                                                rust_and_vulkan::ecss_automation::AutomationEngine::from_json_str(content)
+                                            };
+                                            match parse_result {
+                                                Ok(engine) => {
+                                                    automation_executing = true;
+                                                    automation_stats = None;
+                                                    automation_error = None;
+                                                    automation_current_command = None;
+                                                    automation_progress_label.clear();
+                                                    automation_log.clear();
+                                                    let (tx, rx) = std::sync::mpsc::channel();
+                                                    automation_rx = Some(rx);
+                                                    std::thread::spawn(move || {
+                                                        let rt = tokio::runtime::Runtime::new()
+                                                            .expect("tokio runtime");
+                                                        let result = rt
+                                                            .block_on(async {
+                                                                engine
+                                                                    .execute_with_progress(|event| {
+                                                                        let _ = tx.send(
+                                                                            AutomationThreadMessage::Progress(
+                                                                                event,
+                                                                            ),
+                                                                        );
+                                                                    })
+                                                                    .await
+                                                            })
+                                                            .map_err(|e| e.to_string());
+                                                        let _ = tx.send(
+                                                            AutomationThreadMessage::Finished(result),
+                                                        );
+                                                    });
+                                                }
+                                                Err(e) => {
+                                                    automation_error =
+                                                        Some(format!("Parse error: {}", e));
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else if file_name.is_some() {
+                                    ui.label("⚠ Only .toml / .json files can be executed");
+                                }
+
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.button("Close").clicked() {
+                                            automation_loader.show_code_display = false;
+                                        }
+                                    },
+                                );
+                            });
+
+                            if let Some(stats) = &automation_stats {
+                                let color = if stats.failed == 0 {
+                                    egui::Color32::from_rgb(0, 160, 0)
+                                } else {
+                                    egui::Color32::from_rgb(200, 140, 0)
+                                };
+                                ui.colored_label(
+                                    color,
+                                    format!(
+                                        "✓ Done: {}/{} commands, {} ms, {:.1}% success",
+                                        stats.successful,
+                                        stats.successful + stats.failed,
+                                        stats.elapsed_ms,
+                                        stats.success_rate()
+                                    ),
+                                );
+                            }
+                            if automation_executing {
+                                if automation_progress_label.is_empty() {
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(50, 120, 200),
+                                        "Running automation…",
+                                    );
+                                } else {
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(50, 120, 200),
+                                        automation_progress_label.as_str(),
+                                    );
+                                }
+                            }
+                            if let Some(error) = &automation_error {
+                                ui.colored_label(egui::Color32::RED, format!("❌ {}", error));
+                            }
+
+                            egui::CollapsingHeader::new("Execution Log")
+                                .default_open(automation_executing)
+                                .show(ui, |ui| {
+                                    egui::ScrollArea::vertical()
+                                        .max_height(130.0)
+                                        .auto_shrink([false; 2])
+                                        .show(ui, |ui| {
+                                            if automation_log.is_empty() {
+                                                ui.label("No entries yet");
+                                            } else {
+                                                for entry in &automation_log {
+                                                    ui.monospace(entry);
+                                                }
+                                            }
+                                        });
+                                });
+                        });
                     });
 
-                if should_close_code_display {
-                    automation_loader.show_code_display = false;
-                }
+                automation_loader.show_code_display = window_open;
             }
         }
 
@@ -576,7 +1055,7 @@ fn main() -> Result<(), String> {
         let proj: gl::Mat4 = num_traits::one();
         let mvp = proj * rot;
 
-        // Update the MPV buffer with the new matrix
+        // Update CPU upload buffer, then copy to device-local MPV buffer.
         let mpv_data = MPV_PushConstants { mpv: mvp };
         let mpv_bytes = unsafe {
             std::slice::from_raw_parts(
@@ -584,7 +1063,17 @@ fn main() -> Result<(), String> {
                 std::mem::size_of::<MPV_PushConstants>(),
             )
         };
-        mpv_buffer.write(mpv_bytes).map_err(|e| e.to_string())?;
+        mpv_upload_buffer
+            .write(mpv_bytes)
+            .map_err(|e| e.to_string())?;
+        cmd.copy_vk_buffer(
+            mpv_upload_buffer.vk_buffer(),
+            mpv_buffer.vk_buffer(),
+            std::mem::size_of::<MPV_PushConstants>(),
+            0,
+            0,
+        )
+        .map_err(|e| e.to_string())?;
 
         // Push the device addresses + texture index for the fragment shader
         let pc = PushConstants {
@@ -622,6 +1111,10 @@ fn main() -> Result<(), String> {
 
     // Vulkan requires all child objects to be destroyed before destroying the device.
     context.destroy_sampler(sampler);
+
+    unsafe {
+        rust_and_vulkan::SDL_StopTextInput(window.window);
+    }
 
     Ok(())
 }

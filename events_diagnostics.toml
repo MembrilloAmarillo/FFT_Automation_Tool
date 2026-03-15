@@ -1,0 +1,92 @@
+# ECSS Spacecraft Automation - Events & Diagnostics
+# Tests: Event enable/disable and parameter monitoring
+
+[yamcs]
+base_url = "http://localhost:8090"
+instance = "myproject"
+processor = "realtime"
+username = "admin"
+password = "admin"
+origin = "rust-automation"
+
+timeout_ms = 60000
+stop_on_error = false
+repeat_count = 0
+
+# ============================================================================
+# EVENT MANAGEMENT
+# ============================================================================
+
+[[commands]]
+name = "PUS_17_1"
+description = "Check spacecraft alive"
+delay_ms = 500
+retry_count = 1
+
+[[commands]]
+name = "PUS_5_5"
+description = "Enable all available event reports"
+delay_ms = 1500
+retry_count = 1
+
+[commands.args]
+N = 1
+Event_ID = [1]
+
+# ============================================================================
+# PARAMETER COLLECTION
+# ============================================================================
+
+[[commands]]
+name = "PUS_24_1"
+description = "Enable parameter collection for EPS System"
+delay_ms = 1000
+retry_count = 0
+
+[commands.args]
+HK_Structure_ID = 5
+N = 3
+Parameter_ID = [100, 101, 102]
+
+[[commands]]
+name = "PUS_24_1"
+description = "Enable parameter collection for ADCS"
+delay_ms = 1000
+retry_count = 0
+
+[commands.args]
+HK_Structure_ID = 1
+N = 2
+Parameter_ID = [50, 51]
+
+[[commands]]
+name = "PUS_24_3"
+description = "Query active parameters for EPS System"
+delay_ms = 1500
+retry_count = 0
+
+[commands.args]
+HK_Structure_ID = 5
+N = 3
+Parameter_ID = [100, 101, 102]
+
+[[commands]]
+name = "PUS_24_2"
+description = "Disable parameter 102 from EPS System"
+delay_ms = 1000
+retry_count = 0
+
+[commands.args]
+HK_Structure_ID = 5
+N = 1
+Parameter_ID = [102]
+
+[[commands]]
+name = "PUS_5_6"
+description = "Disable all event reports"
+delay_ms = 1000
+retry_count = 0
+
+[commands.args]
+N = 1
+Event_ID = [1]
