@@ -20,7 +20,7 @@ impl EguiManager {
     pub fn new() -> Self {
         let ctx = egui::Context::default();
 
-        ctx.set_visuals(egui::Visuals::light());
+        ctx.set_visuals(egui::Visuals::dark()); // Use dark theme for better contrast
 
         // Configure egui for better performance
         let mut style = (*ctx.style()).clone();

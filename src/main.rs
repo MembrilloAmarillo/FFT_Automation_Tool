@@ -421,30 +421,9 @@ fn main() -> Result<(), String> {
 
         // Build UI panels
         {
-            egui::Window::new("Options")
-                .vscroll(true)
-                .show(&egui_manager.ctx, |ui| {
-                    ui.label("Select an option:");
-                    if ui.button("Option 1").clicked() {
-                        egui_manager.selected_option = "Option 1";
-                    }
-                    if ui.button("Option 2").clicked() {
-                        egui_manager.selected_option = "Option 2";
-                    }
-                    if ui.button("Option 3").clicked() {
-                        egui_manager.selected_option = "Option 3";
-                    }
-                });
-
             egui::Window::new("Data Display")
                 .vscroll(true)
                 .show(&egui_manager.ctx, |ui| {
-                    ui.label("Selected:");
-                    ui.label(egui_manager.selected_option);
-                    ui.separator();
-                    ui.label("Status:");
-                    ui.label(egui_manager.data_display);
-                    ui.separator();
                     ui.label(egui::RichText::new(refresh_label.as_str()));
                 });
 
@@ -879,7 +858,7 @@ fn main() -> Result<(), String> {
             swapchain.framebuffer(image_index),
             extent.width,
             extent.height,
-            [0.95, 0.95, 0.95, 1.0], // Light gray background to match light theme
+            [0.02, 0.02, 0.02, 1.0], // Dark gray background to match dark theme
         );
 
         // Render egui UI on top of scene
