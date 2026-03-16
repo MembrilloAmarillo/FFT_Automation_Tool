@@ -142,7 +142,7 @@ fn main() -> Result<(), String> {
             b"1\0".as_ptr() as *const i8,
         );
     }
-    let window = SdlWindow::new("Rotating Square (bindless textures + fallback)", 800, 600)?;
+    let window = SdlWindow::new("AutomationWare", 800, 600)?;
 
     // SDL3 requires explicit text-input activation for reliable TEXT_INPUT events.
     // Without this, egui text boxes may not receive typed characters.
@@ -193,13 +193,6 @@ fn main() -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
-    // Shaders
-    let vert_spv = load_spirv_u32("shaders/simple_square.vert.spv")?;
-    let frag_spv = load_spirv_u32("shaders/simple_square.frag.spv")?;
-
-    let vs = ShaderModule::new(&context, &vert_spv).map_err(|e| e.to_string())?;
-    let fs = ShaderModule::new(&context, &frag_spv).map_err(|e| e.to_string())?;
-
     let use_bindless_descriptor_buffer = context.descriptor_buffer_supported();
     if !use_bindless_descriptor_buffer {
         eprintln!(
@@ -207,150 +200,9 @@ fn main() -> Result<(), String> {
         );
     }
 
-    // Geometry (vertex pulling via buffer device address)
-    let square_vertices = vec![
-        Vertex {
-            pos: [-0.5, -0.5],
-            normal: [0.0, 0.0, 1.0],
-            uv: [0.0, 0.0],
-        },
-        Vertex {
-            pos: [0.5, -0.5],
-            normal: [0.0, 0.0, 1.0],
-            uv: [1.0, 0.0],
-        },
-        Vertex {
-            pos: [0.5, 0.5],
-            normal: [0.0, 0.0, 1.0],
-            uv: [1.0, 1.0],
-        },
-        Vertex {
-            pos: [0.5, 0.5],
-            normal: [0.0, 0.0, 1.0],
-            uv: [1.0, 1.0],
-        },
-        Vertex {
-            pos: [-0.5, 0.5],
-            normal: [0.0, 0.0, 1.0],
-            uv: [0.0, 1.0],
-        },
-        Vertex {
-            pos: [-0.5, -0.5],
-            normal: [0.0, 0.0, 1.0],
-            uv: [0.0, 0.0],
-        },
-    ];
-    let vertex_buffer = Buffer::vertex_buffer(&context, &square_vertices)
-        .map_err(|e| format!("Failed to create square vertex buffer: {}", e))?;
-
-    // MVP buffer strategy (optimal for discrete + compatible with old fallback GPUs):
-    // - `mpv_buffer`: device-local GPU buffer used by shaders via buffer device address.
-    // - `mpv_upload_buffer`: CPU-mapped transfer source updated each frame.
-    // Each frame we copy upload -> device-local before drawing.
-    let (mpv_buffer, mpv_upload_buffer) = {
-        let mpv = MPV_PushConstants {
-            mpv: num_traits::one(), // identity initially
-        };
-        let size = std::mem::size_of::<MPV_PushConstants>();
-
-        let gpu_buf = Buffer::new(
-            &context,
-            size,
-            BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
-            MemoryType::GpuOnly,
-        )
-        .map_err(|e| format!("Failed to create GPU MPV buffer: {}", e))?;
-
-        let upload_buf = Buffer::new(
-            &context,
-            size,
-            BufferUsage::TRANSFER_SRC,
-            MemoryType::CpuMapped,
-        )
-        .map_err(|e| format!("Failed to create MPV upload buffer: {}", e))?;
-
-        let bytes = unsafe {
-            std::slice::from_raw_parts(&mpv as *const MPV_PushConstants as *const u8, size)
-        };
-        upload_buf
-            .write(bytes)
-            .map_err(|e| format!("Failed to initialize MPV upload buffer: {}", e))?;
-
-        (gpu_buf, upload_buf)
-    };
-
-    // Create a tiny 2x2 RGBA texture (used for both bindless and fallback paths).
-    let tex_pixels: Vec<u8> = vec![
-        255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255,
-    ];
-    let texture = context
-        .upload_texture(
-            &tex_pixels,
-            2,
-            2,
-            Format::Rgba8Unorm,
-            TextureUsage::SAMPLED | TextureUsage::TRANSFER_DST,
-        )
-        .map_err(|e| e.to_string())?;
-
-    let sampler = context
-        .create_default_sampler()
-        .map_err(|e| e.to_string())?;
-
     // Bindless heap path (if supported)
     let mut bindless_heap: Option<TextureDescriptorHeap> = None;
     let mut bindless_texture_index: u32 = 0;
-
-    if context.descriptor_buffer_supported() {
-        let mut heap = TextureDescriptorHeap::new(&context, 64).map_err(|e| e.to_string())?;
-        let idx = heap.allocate().map_err(|e| e.to_string())?;
-        heap.write_descriptor(&context, idx, &texture, sampler)
-            .map_err(|e| e.to_string())?;
-        bindless_texture_index = idx;
-        bindless_heap = Some(heap);
-    }
-
-    // Fallback descriptor-set path (always available in this demo)
-    let set_layout =
-        DescriptorSetLayout::new_texture_array(&context, 1).map_err(|e| e.to_string())?;
-    let pool = DescriptorPool::new(&context, 1, 1).map_err(|e| e.to_string())?;
-    let fallback_set: DescriptorSet = pool.allocate(&set_layout).map_err(|e| e.to_string())?;
-    fallback_set
-        .write_textures(&context, &[&texture], sampler)
-        .map_err(|e| e.to_string())?;
-
-    let layout = if use_bindless_descriptor_buffer {
-        let bindless_set_layout =
-            DescriptorSetLayout::new_bindless_textures(&context, 64).map_err(|e| e.to_string())?;
-        PipelineLayout::with_descriptor_set_layouts_and_push_size(
-            &context,
-            &[bindless_set_layout],
-            rust_and_vulkan::simple::SHADER_STAGE_VERTEX
-                | rust_and_vulkan::simple::SHADER_STAGE_FRAGMENT,
-            size_of::<PushConstants>() as u32,
-        )
-        .map_err(|e| e.to_string())?
-    } else {
-        PipelineLayout::with_descriptor_set_layouts_and_push_size(
-            &context,
-            &[set_layout],
-            rust_and_vulkan::simple::SHADER_STAGE_VERTEX
-                | rust_and_vulkan::simple::SHADER_STAGE_FRAGMENT,
-            size_of::<PushConstants>() as u32,
-        )
-        .map_err(|e| e.to_string())?
-    };
-
-    let pipeline = if use_bindless_descriptor_buffer {
-        GraphicsPipeline::builder(&context, &vs, &fs, &layout, swapchain.render_pass())
-            .with_descriptor_buffer()
-            .build()
-    } else {
-        GraphicsPipeline::builder(&context, &vs, &fs, &layout, swapchain.render_pass())
-            .with_config(GraphicsPipelineConfig::standard_opaque())
-            .build()
-    }
-    .map_err(|e| e.to_string())?;
 
     let start = std::time::Instant::now();
 
@@ -364,13 +216,13 @@ fn main() -> Result<(), String> {
     let mut refresh_label = String::with_capacity(64); // Pre-allocate to prevent reallocation
     refresh_label.push_str("Current refresh: --.- Hz");
     let mut last_refresh_label_update = std::time::Instant::now();
-    let refresh_label_update_interval = std::time::Duration::from_millis(250);
+    let refresh_label_update_interval = std::time::Duration::from_millis(16);
 
     // Initialize automation file loader
     let mut automation_loader = AutomationFileLoader::default();
     automation_loader.refresh_files();
     let mut filter_last_edit_at: Option<std::time::Instant> = None;
-    let filter_debounce = std::time::Duration::from_millis(250);
+    let filter_debounce = std::time::Duration::from_millis(16);
 
     // Automation execution state
     let mut automation_executing = false;
@@ -383,7 +235,7 @@ fn main() -> Result<(), String> {
     let mut automation_rx: Option<std::sync::mpsc::Receiver<AutomationThreadMessage>> = None;
 
     // Commander UDP UI state
-    let mut commander_show_window = false;
+    let mut commander_show_window = true;
     let mut commander_target_host = "127.0.0.1".to_string();
     let mut commander_target_port: u16 = 8092;
     let mut ftp_list_path = "/".to_string();
@@ -1019,40 +871,6 @@ fn main() -> Result<(), String> {
             )
             .map_err(|e| e.to_string())?;
 
-        // Update MVP matrix each frame: rotate around Z.
-        let t = start.elapsed().as_secs_f32();
-        let ident: gl::Mat4 = num_traits::one();
-        let rot = gl::ext::rotate(&ident, t, gl::vec3(0.0, 0.0, 1.0));
-        let proj: gl::Mat4 = num_traits::one();
-        let mvp = proj * rot;
-
-        // Update CPU upload buffer, then copy to device-local MPV buffer.
-        let mpv_data = MPV_PushConstants { mpv: mvp };
-        let mpv_bytes = unsafe {
-            std::slice::from_raw_parts(
-                (&mpv_data as *const MPV_PushConstants) as *const u8,
-                std::mem::size_of::<MPV_PushConstants>(),
-            )
-        };
-        mpv_upload_buffer
-            .write(mpv_bytes)
-            .map_err(|e| e.to_string())?;
-
-        let single_command = context
-            .begin_single_time_commands()
-            .map_err(|e| e.to_string())?;
-
-        single_command
-            .copy_vk_buffer(
-                mpv_upload_buffer.vk_buffer(),
-                mpv_buffer.vk_buffer(),
-                std::mem::size_of::<MPV_PushConstants>(),
-                0,
-                0,
-            )
-            .map_err(|e| e.to_string())?;
-        context.end_single_time_commands(single_command).unwrap();
-
         // Record commands
         cmd.begin().map_err(|e| e.to_string())?;
 
@@ -1063,42 +881,6 @@ fn main() -> Result<(), String> {
             extent.height,
             [0.95, 0.95, 0.95, 1.0], // Light gray background to match light theme
         );
-
-        cmd.bind_pipeline(&pipeline);
-
-        if use_bindless_descriptor_buffer {
-            let Some(ref heap) = bindless_heap else {
-                return Err(
-                    "bindless mode selected but descriptor heap not initialized".to_string()
-                );
-            };
-            cmd.bind_texture_heap(
-                heap,
-                &layout,
-                0,
-                rust_and_vulkan::VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS,
-            );
-        } else {
-            cmd.bind_descriptor_sets(&layout, 0, &[&fallback_set]);
-        }
-
-        // Push the device addresses + texture index for the fragment shader
-        let pc = PushConstants {
-            vertex_ptr: vertex_buffer.device_address(),
-            mpv_ptr: mpv_buffer.device_address(),
-            texture_index: bindless_texture_index,
-        };
-
-        let pc_bytes = unsafe {
-            std::slice::from_raw_parts(
-                (&pc as *const PushConstants) as *const u8,
-                std::mem::size_of::<PushConstants>(),
-            )
-        };
-        cmd.push_constants(&layout, pc_bytes);
-
-        // Draw 2 triangles (6 vertices)
-        cmd.draw(6, 1, 0, 0);
 
         // Render egui UI on top of scene
         egui_renderer
@@ -1115,9 +897,6 @@ fn main() -> Result<(), String> {
     }
     // Ensure device idle before drop order tears things down.
     context.wait_idle().map_err(|e| e.to_string())?;
-
-    // Vulkan requires all child objects to be destroyed before destroying the device.
-    context.destroy_sampler(sampler);
 
     unsafe {
         rust_and_vulkan::SDL_StopTextInput(window.window);
