@@ -1,6 +1,7 @@
 use rust_and_vulkan::automation::AutomationFileLoader;
 use rust_and_vulkan::ecss_automation::{ExecutionEvent, ExecutionStats};
 use rust_and_vulkan::{EguiManager, EguiRenderer};
+use rust_and_vulkan::{ProgramConfig, ProgramRunner, RuntimeConfig};
 use rust_and_vulkan::{SdlContext, SdlWindow, VulkanDevice, VulkanInstance, VulkanSurface};
 
 use rust_and_vulkan::simple::{
@@ -10,6 +11,7 @@ use rust_and_vulkan::simple::{
 };
 
 use glm as gl;
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::net::UdpSocket;
 
@@ -37,6 +39,27 @@ fn send_commander_udp(target: &str, command_line: &str) -> Result<String, String
         }
         Err(e) => Err(format!("recv_from failed: {}", e)),
     }
+}
+
+fn parse_program_args(raw: &str) -> Vec<String> {
+    raw.split_whitespace().map(|s| s.to_string()).collect()
+}
+
+fn parse_program_env(raw: &str) -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = trimmed.split_once('=') {
+            let key = k.trim();
+            if !key.is_empty() {
+                env.insert(key.to_string(), v.trim().to_string());
+            }
+        }
+    }
+    env
 }
 
 fn render_virtualized_code_view(
@@ -246,6 +269,29 @@ fn main() -> Result<(), String> {
     let mut commander_status = String::new();
     let mut commander_log: Vec<String> = Vec::new();
 
+    // Program runner UI state
+    let mut program_runner_show_window = true;
+    let program_runner_config_path = std::env::current_dir()
+        .map_err(|e| format!("Failed to read current dir: {}", e))?
+        .join("program_runner.toml");
+    let mut program_runner = ProgramRunner::load_or_create(&program_runner_config_path)
+        .map_err(|e| format!("Failed to initialize program runner config: {}", e))?;
+    let mut program_runner_status = String::new();
+
+    // Program form fields
+    let mut prg_id = String::new();
+    let mut prg_name = String::new();
+    let mut prg_command = String::new();
+    let mut prg_args = String::new();
+    let mut prg_working_dir = String::new();
+    let mut prg_env = String::new();
+    let mut prg_auto_start = false;
+    let mut prg_use_python_venv = false;
+    let mut prg_venv_path = String::new();
+    let mut prg_python_executable = String::new();
+    let mut prg_use_conda_env = false;
+    let mut prg_conda_env_name = String::new();
+
     // Event + render loop
     let mut quit = false;
     let mut window_resized = false;
@@ -262,6 +308,10 @@ fn main() -> Result<(), String> {
         }
 
         automation_loader.poll_file_load();
+
+        if let Err(e) = program_runner.poll() {
+            program_runner_status = format!("Poll error: {}", e);
+        }
 
         // Poll background automation thread for results
         if automation_executing {
@@ -562,6 +612,484 @@ fn main() -> Result<(), String> {
                                         }
                                     });
                             });
+                    });
+            }
+
+            if program_runner_show_window {
+                egui::Window::new("📦 Program Runner")
+                    .open(&mut program_runner_show_window)
+                    .default_width(900.0)
+                    .default_height(700.0)
+                    .show(&egui_manager.ctx, |ui| {
+                        // Status bar at top
+                        if !program_runner_status.is_empty() {
+                            let status_color = if program_runner_status.contains("Error")
+                                || program_runner_status.contains("failed")
+                            {
+                                egui::Color32::from_rgb(220, 50, 50)
+                            } else if program_runner_status.contains("saved") {
+                                egui::Color32::from_rgb(50, 180, 50)
+                            } else {
+                                egui::Color32::from_rgb(100, 150, 200)
+                            };
+                            ui.colored_label(status_color, format!("ℹ {}", program_runner_status));
+                            ui.separator();
+                        }
+
+                        // Global action buttons in a prominent bar
+                        ui.horizontal(|ui| {
+                            ui.heading("🎮 Quick Actions");
+                            ui.separator();
+
+                            if ui.button("▶ Start Auto").clicked() {
+                                match program_runner.start_auto_programs() {
+                                    Ok(handles) => {
+                                        program_runner_status =
+                                            format!("Started {} auto program(s)", handles.len())
+                                    }
+                                    Err(e) => {
+                                        program_runner_status = format!("Start auto failed: {}", e)
+                                    }
+                                }
+                            }
+
+                            if ui.button("⏹ Stop All").clicked() {
+                                match program_runner.stop_all() {
+                                    Ok(_) => {
+                                        program_runner_status =
+                                            "Stopped all running programs".to_string()
+                                    }
+                                    Err(e) => {
+                                        program_runner_status = format!("Stop all failed: {}", e)
+                                    }
+                                }
+                            }
+
+                            if ui.button("💾 Save").clicked() {
+                                match program_runner.save() {
+                                    Ok(_) => {
+                                        program_runner_status =
+                                            "Config saved successfully".to_string()
+                                    }
+                                    Err(e) => {
+                                        program_runner_status =
+                                            format!("Failed to save config: {}", e)
+                                    }
+                                }
+                            }
+                        });
+
+                        ui.separator();
+
+                        // Two-column layout
+                        ui.columns(2, |columns| {
+                            // LEFT COLUMN: Program list
+                            columns[0].vertical(|ui| {
+                                ui.group(|ui| {
+                                    ui.heading("📋 Configured Programs");
+                                    ui.separator();
+
+                                    let programs_snapshot: Vec<ProgramConfig> =
+                                        program_runner.list_programs().to_vec();
+                                    let running_pairs = program_runner.running_programs();
+                                    let mut running_by_program: HashMap<String, u32> =
+                                        HashMap::new();
+                                    for (handle, program_id) in running_pairs {
+                                        running_by_program.insert(program_id.to_string(), handle);
+                                    }
+
+                                    let mut start_program_id: Option<String> = None;
+                                    let mut stop_handle: Option<u32> = None;
+                                    let mut remove_program_id: Option<String> = None;
+                                    let mut edit_program_id: Option<String> = None;
+
+                                    if programs_snapshot.is_empty() {
+                                        ui.colored_label(
+                                            egui::Color32::from_rgb(150, 150, 150),
+                                            "No programs configured yet",
+                                        );
+                                    } else {
+                                        egui::ScrollArea::vertical().max_height(450.0).show(
+                                            ui,
+                                            |ui| {
+                                                for p in &programs_snapshot {
+                                                    ui.group(|ui| {
+                                                        ui.horizontal(|ui| {
+                                                            let status_color = if let Some(handle) =
+                                                                running_by_program.get(&p.id)
+                                                            {
+                                                                ui.colored_label(
+                                                                    egui::Color32::from_rgb(
+                                                                        50, 200, 50,
+                                                                    ),
+                                                                    "●",
+                                                                );
+                                                                ui.label(
+                                                                    egui::RichText::new(&p.name)
+                                                                        .strong(),
+                                                                );
+                                                                ui.colored_label(
+                                                                    egui::Color32::from_rgb(
+                                                                        50, 200, 50,
+                                                                    ),
+                                                                    format!("(#{})", handle),
+                                                                );
+
+                                                                if ui.button("⏹").clicked() {
+                                                                    stop_handle = Some(*handle);
+                                                                }
+                                                            } else {
+                                                                ui.colored_label(
+                                                                    egui::Color32::from_rgb(
+                                                                        200, 150, 50,
+                                                                    ),
+                                                                    "◯",
+                                                                );
+                                                                ui.label(&p.name);
+
+                                                                if ui.button("▶").clicked() {
+                                                                    start_program_id =
+                                                                        Some(p.id.clone());
+                                                                }
+                                                            };
+
+                                                            if ui.button("✎").clicked() {
+                                                                edit_program_id =
+                                                                    Some(p.id.clone());
+                                                            }
+
+                                                            if ui.button("✕").clicked() {
+                                                                remove_program_id =
+                                                                    Some(p.id.clone());
+                                                            }
+                                                        });
+
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("cmd:");
+                                                            ui.monospace(format!(
+                                                                "{}{}",
+                                                                p.command,
+                                                                if p.args.is_empty() {
+                                                                    String::new()
+                                                                } else {
+                                                                    format!(" {}", p.args.join(" "))
+                                                                }
+                                                            ));
+                                                        });
+
+                                                        if let Some(dir) = &p.working_dir {
+                                                            ui.small(format!(
+                                                                "📁 {}",
+                                                                dir.display()
+                                                            ));
+                                                        }
+
+                                                        match &p.runtime {
+                                                            RuntimeConfig::Direct => {
+                                                                ui.small("🔧 Runtime: Direct")
+                                                            }
+                                                            RuntimeConfig::PythonVenv {
+                                                                venv_path,
+                                                                python_executable,
+                                                            } => ui.small(format!(
+                                                                "🐍 Python Venv: {}",
+                                                                venv_path
+                                                            )),
+                                                            RuntimeConfig::CondaEnv {
+                                                                env_name,
+                                                            } => ui.small(format!(
+                                                                "🐍 Conda: {}",
+                                                                env_name
+                                                            )),
+                                                        };
+
+                                                        if p.auto_start {
+                                                            ui.small("⚡ Auto-start enabled");
+                                                        }
+                                                    });
+                                                }
+                                            },
+                                        );
+                                    }
+
+                                    // Handle deferred actions
+                                    if let Some(id) = start_program_id {
+                                        match program_runner.start_program(&id) {
+                                            Ok(handle) => {
+                                                program_runner_status =
+                                                    format!("✓ Started '{}' #{}", id, handle)
+                                            }
+                                            Err(e) => {
+                                                program_runner_status =
+                                                    format!("✗ Failed to start '{}': {}", id, e)
+                                            }
+                                        }
+                                    }
+
+                                    if let Some(handle) = stop_handle {
+                                        match program_runner.stop_program(handle) {
+                                            Ok(_) => {
+                                                program_runner_status =
+                                                    format!("✓ Stopped program #{}", handle)
+                                            }
+                                            Err(e) => {
+                                                program_runner_status =
+                                                    format!("✗ Failed to stop #{}: {}", handle, e)
+                                            }
+                                        }
+                                    }
+
+                                    if let Some(id) = remove_program_id {
+                                        match program_runner.remove_program(&id) {
+                                            Ok(true) => {
+                                                program_runner_status =
+                                                    format!("✓ Removed program '{}'", id)
+                                            }
+                                            Ok(false) => {
+                                                program_runner_status =
+                                                    format!("Program '{}' not found", id)
+                                            }
+                                            Err(e) => {
+                                                program_runner_status =
+                                                    format!("✗ Failed to remove '{}': {}", id, e)
+                                            }
+                                        }
+                                    }
+
+                                    if let Some(id) = edit_program_id {
+                                        if let Some(existing) = programs_snapshot
+                                            .iter()
+                                            .find(|program| program.id == id)
+                                        {
+                                            prg_id = existing.id.clone();
+                                            prg_name = existing.name.clone();
+                                            prg_command = existing.command.clone();
+                                            prg_args = existing.args.join(" ");
+                                            prg_working_dir = existing
+                                                .working_dir
+                                                .as_ref()
+                                                .map(|p| p.display().to_string())
+                                                .unwrap_or_default();
+                                            prg_auto_start = existing.auto_start;
+                                            prg_env = if existing.env.is_empty() {
+                                                String::new()
+                                            } else {
+                                                let mut rows: Vec<String> = existing
+                                                    .env
+                                                    .iter()
+                                                    .map(|(k, v)| format!("{}={}", k, v))
+                                                    .collect();
+                                                rows.sort();
+                                                rows.join("\n")
+                                            };
+
+                                            match &existing.runtime {
+                                                RuntimeConfig::Direct => {
+                                                    prg_use_python_venv = false;
+                                                    prg_venv_path.clear();
+                                                    prg_python_executable.clear();
+                                                    prg_use_conda_env = false;
+                                                    prg_conda_env_name.clear();
+                                                }
+                                                RuntimeConfig::PythonVenv {
+                                                    venv_path,
+                                                    python_executable,
+                                                } => {
+                                                    prg_use_python_venv = true;
+                                                    prg_venv_path = venv_path.clone();
+                                                    prg_python_executable = python_executable
+                                                        .clone()
+                                                        .unwrap_or_default();
+                                                    prg_use_conda_env = false;
+                                                    prg_conda_env_name.clear();
+                                                }
+                                                RuntimeConfig::CondaEnv { env_name } => {
+                                                    prg_use_python_venv = false;
+                                                    prg_venv_path.clear();
+                                                    prg_python_executable.clear();
+                                                    prg_use_conda_env = true;
+                                                    prg_conda_env_name = env_name.clone();
+                                                }
+                                            }
+                                        }
+                                    }
+                                });
+                            });
+
+                            // RIGHT COLUMN: Program editor
+                            columns[1].vertical(|ui| {
+                                ui.group(|ui| {
+                                    ui.heading("➕ Add / Edit Program");
+                                    ui.separator();
+
+                                    let is_editing = !prg_id.is_empty();
+                                    if is_editing {
+                                        ui.colored_label(
+                                            egui::Color32::from_rgb(100, 180, 220),
+                                            format!("✎ Editing: {}", prg_id),
+                                        );
+                                    }
+
+                                    ui.separator();
+                                    ui.label("Program Identity");
+                                    ui.horizontal(|ui| {
+                                        ui.label("ID:");
+                                        ui.text_edit_singleline(&mut prg_id);
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Name:");
+                                        ui.text_edit_singleline(&mut prg_name);
+                                    });
+
+                                    ui.separator();
+                                    ui.label("Execution");
+                                    ui.horizontal(|ui| {
+                                        ui.label("Command:");
+                                        ui.text_edit_singleline(&mut prg_command);
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Args:");
+                                        ui.text_edit_singleline(&mut prg_args);
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Working dir:");
+                                        ui.text_edit_singleline(&mut prg_working_dir);
+                                    });
+
+                                    ui.separator();
+                                    ui.label("Runtime Environment");
+                                    ui.horizontal(|ui| {
+                                        ui.selectable_value(
+                                            &mut prg_use_python_venv,
+                                            false,
+                                            "Direct",
+                                        );
+                                        ui.selectable_value(
+                                            &mut prg_use_python_venv,
+                                            true,
+                                            "Python Venv",
+                                        );
+                                        ui.selectable_value(
+                                            &mut prg_use_conda_env,
+                                            true,
+                                            "Conda Env",
+                                        );
+                                    });
+
+                                    if prg_use_python_venv && !prg_use_conda_env {
+                                        ui.horizontal(|ui| {
+                                            ui.label("Venv path:");
+                                            ui.text_edit_singleline(&mut prg_venv_path);
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Python exec:");
+                                            ui.text_edit_singleline(&mut prg_python_executable);
+                                        });
+                                    }
+
+                                    if prg_use_conda_env && !prg_use_python_venv {
+                                        ui.horizontal(|ui| {
+                                            ui.label("Conda env:");
+                                            ui.text_edit_singleline(&mut prg_conda_env_name);
+                                        });
+                                    }
+
+                                    ui.separator();
+                                    ui.label("Environment Variables");
+                                    ui.add(
+                                        egui::TextEdit::multiline(&mut prg_env)
+                                            .desired_rows(3)
+                                            .desired_width(f32::INFINITY)
+                                            .hint_text("KEY=VALUE (one per line)"),
+                                    );
+
+                                    ui.separator();
+                                    ui.checkbox(&mut prg_auto_start, "⚡ Auto-start on load");
+
+                                    ui.separator();
+                                    ui.horizontal(|ui| {
+                                        if ui.button("💾 Save Program").clicked() {
+                                            let runtime = if prg_use_python_venv
+                                                && !prg_use_conda_env
+                                            {
+                                                RuntimeConfig::PythonVenv {
+                                                    venv_path: prg_venv_path.trim().to_string(),
+                                                    python_executable: if prg_python_executable
+                                                        .trim()
+                                                        .is_empty()
+                                                    {
+                                                        None
+                                                    } else {
+                                                        Some(
+                                                            prg_python_executable
+                                                                .trim()
+                                                                .to_string(),
+                                                        )
+                                                    },
+                                                }
+                                            } else if prg_use_conda_env && !prg_use_python_venv {
+                                                RuntimeConfig::CondaEnv {
+                                                    env_name: prg_conda_env_name.trim().to_string(),
+                                                }
+                                            } else {
+                                                RuntimeConfig::Direct
+                                            };
+
+                                            let program = ProgramConfig {
+                                                id: prg_id.trim().to_string(),
+                                                name: prg_name.trim().to_string(),
+                                                command: prg_command.trim().to_string(),
+                                                args: parse_program_args(&prg_args),
+                                                working_dir: if prg_working_dir.trim().is_empty() {
+                                                    None
+                                                } else {
+                                                    Some(std::path::PathBuf::from(
+                                                        prg_working_dir.trim(),
+                                                    ))
+                                                },
+                                                env: parse_program_env(&prg_env),
+                                                auto_start: prg_auto_start,
+                                                runtime,
+                                                last_run_unix: None,
+                                                last_exit_code: None,
+                                            };
+
+                                            match program_runner.upsert_program(program) {
+                                                Ok(_) => {
+                                                    program_runner_status =
+                                                        "✓ Program saved".to_string()
+                                                }
+                                                Err(e) => {
+                                                    program_runner_status =
+                                                        format!("✗ Save failed: {}", e)
+                                                }
+                                            }
+                                        }
+
+                                        if ui.button("🗑 Clear").clicked() {
+                                            prg_id.clear();
+                                            prg_name.clear();
+                                            prg_command.clear();
+                                            prg_args.clear();
+                                            prg_working_dir.clear();
+                                            prg_env.clear();
+                                            prg_auto_start = false;
+                                            prg_use_python_venv = false;
+                                            prg_venv_path.clear();
+                                            prg_python_executable.clear();
+                                            prg_use_conda_env = false;
+                                            prg_conda_env_name.clear();
+                                        }
+                                    });
+                                });
+                            });
+                        });
+
+                        ui.separator();
+                        ui.small(format!(
+                            "📁 Config: {}",
+                            program_runner.config_path().display()
+                        ));
                     });
             }
 

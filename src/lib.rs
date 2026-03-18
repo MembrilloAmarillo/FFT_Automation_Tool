@@ -7,6 +7,7 @@ use libc::c_char;
 pub mod commands;
 pub mod ecss_automation;
 pub mod error;
+pub mod program_runner;
 pub mod xtce_types;
 pub mod yamcs_client;
 
@@ -23,6 +24,10 @@ pub use ecss_automation::*;
 pub use egui_manager::EguiManager;
 pub use egui_renderer::EguiRenderer;
 pub use error::*;
+pub use program_runner::{
+    ApplicationInfo, ProcessStatus, ProgramConfig, ProgramRunner, ProgramRunnerConfig,
+    ProgramRunnerError, RuntimeConfig,
+};
 pub use xtce_types::*;
 pub use yamcs_client::*;
 

@@ -1,0 +1,21 @@
+[application]
+app_name = "AutomationWare"
+app_version = "0.1.0"
+last_opened_unix = 1773825465
+
+[[programs]]
+id = "yamc"
+name = "YAMCS"
+command = "mvn"
+args = ["yamcs:run"]
+working_dir = "/home/polaris/devel/ucanfly_cubesat/OPS/MissionControlFrontend/YAMCS/"
+auto_start = false
+last_run_unix = 1773825465
+last_exit_code = 2
+
+[programs.env]
+
+[programs.runtime]
+kind = "python_venv"
+venv_path = "/home/polaris/devel/ucanfly_cubesat/OPS/MissionControlFrontend/.venv/"
+python_executable = "/home/polaris/devel/ucanfly_cubesat/OPS/MissionControlFrontend/.venv/bin/python"
