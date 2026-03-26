@@ -1,7 +1,7 @@
 [application]
 app_name = "AutomationWare"
 app_version = "0.1.0"
-last_opened_unix = 1774542529
+last_opened_unix = 1774566556
 
 [[programs]]
 id = "yamcs"

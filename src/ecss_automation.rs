@@ -171,6 +171,15 @@ fn is_commander_command(name: &str) -> bool {
     normalize_commander_name(name).is_some()
 }
 
+/// Returns true when the step is a standalone telemetry-wait (no TC is sent).
+///
+/// A step is a telemetry-wait when its `name` is `"WAIT_FOR_TELEMETRY"`.
+/// In that case the engine uses the `telemetry` field (or `verify_packet_name`)
+/// to block until the expected packet arrives and does **not** issue any command.
+fn is_wait_for_telemetry(name: &str) -> bool {
+    name.trim().eq_ignore_ascii_case("WAIT_FOR_TELEMETRY")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelemetryExpectation {
     pub packet_name: String,
@@ -368,7 +377,10 @@ impl AutomationConfig {
             ));
         }
 
-        let has_non_commander = self.commands.iter().any(|c| !is_commander_command(&c.name));
+        let has_non_commander = self
+            .commands
+            .iter()
+            .any(|c| !is_commander_command(&c.name) && !is_wait_for_telemetry(&c.name));
 
         if has_non_commander {
             let yamcs = self.yamcs.as_ref().ok_or_else(|| {
@@ -383,6 +395,16 @@ impl AutomationConfig {
         }
 
         for cmd in &self.commands {
+            // WAIT_FOR_TELEMETRY steps: must have either telemetry or verify_packet_name.
+            if is_wait_for_telemetry(&cmd.name) {
+                if cmd.telemetry.is_none() && cmd.verify_packet_name.is_none() {
+                    return Err(AutomationError::ValidationError(
+                        "WAIT_FOR_TELEMETRY step requires 'telemetry' or 'verify_packet_name'"
+                            .into(),
+                    ));
+                }
+                continue;
+            }
             cmd.validate()?;
         }
 
@@ -439,6 +461,7 @@ impl ExecutionStats {
     }
 }
 
+#[derive(Debug)]
 pub struct AutomationEngine {
     config: AutomationConfig,
     client: Option<YamcsClient>,
@@ -654,6 +677,10 @@ impl AutomationEngine {
             return self.execute_commander_command(cmd).await;
         }
 
+        if is_wait_for_telemetry(&cmd.name) {
+            return self.execute_wait_for_telemetry(cmd).await;
+        }
+
         let Some(client) = &self.client else {
             return Err(AutomationError::ConfigError(
                 "yamcs client is not configured".into(),
@@ -665,6 +692,131 @@ impl AutomationEngine {
         client.issue_command_value(&cmd.name, resolved_args).await?;
         self.verify_if_requested(cmd).await?;
         Ok(())
+    }
+
+    /// Execute a standalone telemetry-wait step.
+    ///
+    /// If the step has a `telemetry` block, that takes precedence over the
+    /// legacy `verify_packet_name` fields.  The step succeeds when the
+    /// expected packet (and optional field checks) are observed within the
+    /// configured timeout; it fails otherwise.
+    async fn execute_wait_for_telemetry(&self, cmd: &CommandDefinition) -> AutomationResult<()> {
+        let Some(client) = &self.client else {
+            return Err(AutomationError::ConfigError(
+                "yamcs client is not configured: required for WAIT_FOR_TELEMETRY step".into(),
+            ));
+        };
+
+        // Prefer the richer `telemetry` block; fall back to legacy verify fields.
+        if let Some(tel) = &cmd.telemetry {
+            let timeout = Duration::from_millis(tel.timeout_ms.max(1));
+            let poll = Duration::from_millis(tel.poll_interval_ms.max(1));
+            let limit = tel.packet_limit.max(1);
+
+            let ok = if tel.packet_name_exact {
+                client
+                    .verify_packet_name_exact_with_polling(&tel.packet_name, limit, timeout, poll)
+                    .await?
+            } else {
+                client
+                    .verify_packet_name_contains_with_polling(
+                        &tel.packet_name,
+                        limit,
+                        timeout,
+                        poll,
+                    )
+                    .await?
+            };
+
+            if !ok {
+                return Err(AutomationError::VerificationError(format!(
+                    "WAIT_FOR_TELEMETRY: expected packet '{}' not observed within {} ms",
+                    tel.packet_name, tel.timeout_ms
+                )));
+            }
+
+            // If the step also specifies field-level checks, verify them now.
+            if !tel.checks.is_empty() {
+                self.verify_telemetry_checks(client, &tel.packet_name, &tel.checks, limit)
+                    .await?;
+            }
+
+            return Ok(());
+        }
+
+        // Legacy: use verify_packet_name fields directly.
+        self.verify_if_requested(cmd).await
+    }
+
+    /// Poll recent packets until every field check in `checks` passes, or
+    /// until we run out of packets to inspect.
+    async fn verify_telemetry_checks(
+        &self,
+        client: &crate::yamcs_client::YamcsClient,
+        packet_name: &str,
+        checks: &[TelemetryCheck],
+        limit: usize,
+    ) -> AutomationResult<()> {
+        let data = client
+            .recent_packets_by_name(packet_name, limit)
+            .await
+            .map_err(AutomationError::from)?;
+
+        // Walk every packet in the response and look for one that satisfies
+        // all checks simultaneously.
+        let packets = data
+            .get("packet")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                AutomationError::VerificationError(format!(
+                    "no packets returned for '{}'",
+                    packet_name
+                ))
+            })?;
+
+        for packet in packets {
+            if self.packet_satisfies_checks(packet, checks) {
+                return Ok(());
+            }
+        }
+
+        let failed: Vec<String> = checks.iter().map(|c| c.name.clone()).collect();
+        Err(AutomationError::VerificationError(format!(
+            "telemetry checks failed for packet '{}': fields {:?} not matched",
+            packet_name, failed
+        )))
+    }
+
+    fn packet_satisfies_checks(&self, packet: &serde_json::Value, checks: &[TelemetryCheck]) -> bool {
+        for check in checks {
+            // Parameters are typically nested under packet["parameters"] or
+            // as top-level fields — try both locations.
+            let field_val = packet
+                .get("parameters")
+                .and_then(|p| p.get(&check.name))
+                .or_else(|| packet.get(&check.name));
+
+            let Some(val) = field_val else {
+                return false;
+            };
+
+            if let Some(expected) = &check.equals {
+                if val != expected {
+                    return false;
+                }
+            }
+
+            if let Some(fragment) = &check.contains {
+                let as_str = match val {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                if !as_str.contains(fragment.as_str()) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     async fn execute_with_retry(&self, cmd: &CommandDefinition) -> AutomationResult<()> {
@@ -933,5 +1085,79 @@ mod tests {
             .expect("err")
             .to_string()
             .contains("udp timeout waiting for ack"));
+    }
+
+    #[test]
+    fn wait_for_telemetry_without_packet_name_fails_validation() {
+        let cfg = json!({
+            "yamcs": {
+                "base_url": "http://localhost:8090",
+                "instance": "myinst",
+                "processor": "realtime",
+                "username": "admin",
+                "password": "changeme",
+                "origin": "test"
+            },
+            "commands": [{"name": "WAIT_FOR_TELEMETRY"}],
+            "stop_on_error": true
+        });
+        let config: AutomationConfig = serde_json::from_value(cfg).expect("config parse");
+        let err = AutomationEngine::new(config).expect_err("should fail without packet name");
+        assert!(
+            err.to_string()
+                .contains("WAIT_FOR_TELEMETRY step requires"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn wait_for_telemetry_with_telemetry_block_passes_validation() {
+        let cfg = json!({
+            "yamcs": {
+                "base_url": "http://localhost:8090",
+                "instance": "myinst",
+                "processor": "realtime",
+                "username": "admin",
+                "password": "changeme",
+                "origin": "test"
+            },
+            "commands": [{
+                "name": "WAIT_FOR_TELEMETRY",
+                "telemetry": {
+                    "packet_name": "PUS_1_1",
+                    "timeout_ms": 5000,
+                    "poll_interval_ms": 500,
+                    "packet_limit": 10
+                }
+            }],
+            "stop_on_error": true
+        });
+        let config: AutomationConfig = serde_json::from_value(cfg).expect("config parse");
+        assert!(AutomationEngine::new(config).is_ok());
+    }
+
+    #[test]
+    fn wait_for_telemetry_with_verify_packet_name_passes_validation() {
+        let cfg = json!({
+            "yamcs": {
+                "base_url": "http://localhost:8090",
+                "instance": "myinst",
+                "processor": "realtime",
+                "username": "admin",
+                "password": "changeme",
+                "origin": "test"
+            },
+            "commands": [{
+                "name": "WAIT_FOR_TELEMETRY",
+                "verify_packet_name": "PUS_17_2",
+                "verify_timeout_ms": 3000,
+                "verify_poll_interval_ms": 500,
+                "verify_packet_limit": 5
+            }],
+            "stop_on_error": true
+        });
+        let config: AutomationConfig = serde_json::from_value(cfg).expect("config parse");
+        assert!(AutomationEngine::new(config).is_ok());
     }
 }

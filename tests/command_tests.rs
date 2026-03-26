@@ -39,8 +39,13 @@ fn test_pus_8_1_eps_channel_on_channel_max() {
 
 #[test]
 fn test_pus_8_1_eps_channel_on_source_id() {
+    // CCSDS_Source_ID is not a payload argument for this command per XTCE;
+    // it is absent from the args object.
     let cmd = Commands::pus_8_1_eps_output_bus_channel_on(1);
-    assert_eq!(cmd.args["CCSDS_Source_ID"], 10);
+    assert!(
+        cmd.args.get("CCSDS_Source_ID").is_none(),
+        "CCSDS_Source_ID should not be set in EPS_OUTPUT_BUS_CHANNEL_ON args"
+    );
 }
 
 // ============================================================================
@@ -472,19 +477,17 @@ fn test_pus_24_2_all_hk_structures() {
 
 #[test]
 fn test_pus_24_3_single_param() {
-    let params = vec![100];
-    let cmd = Commands::pus_24_3(HkStructureId::EpsSys, params).unwrap();
+    let cmd = Commands::pus_24_3(HkStructureId::EpsSys);
     assert_eq!(cmd.name, "PUS_24_3");
     assert_eq!(cmd.args["HK_Structure_ID"], 5);
-    assert_eq!(cmd.args["N"], 1);
+    // PUS_24_3 only takes HK_Structure_ID per XTCE — no N / Parameter_ID array.
+    assert!(cmd.args.get("N").is_none());
 }
 
 #[test]
 fn test_pus_24_3_large_param_set() {
-    let params = vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
-    let cmd = Commands::pus_24_3(HkStructureId::Transceiver, params).unwrap();
+    let cmd = Commands::pus_24_3(HkStructureId::Transceiver);
     assert_eq!(cmd.args["HK_Structure_ID"], 7);
-    assert_eq!(cmd.args["N"], 10);
 }
 
 #[test]
@@ -499,8 +502,7 @@ fn test_pus_24_3_different_hk_structures() {
     ];
 
     for hk in hk_list {
-        let params = vec![42];
-        let cmd = Commands::pus_24_3(hk, params).unwrap();
+        let cmd = Commands::pus_24_3(hk);
         assert_eq!(cmd.args["HK_Structure_ID"], hk.as_u16());
     }
 }

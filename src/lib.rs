@@ -4,6 +4,7 @@
 
 use libc::c_char;
 
+pub mod beacon_dashboard;
 pub mod commands;
 pub mod ecss_automation;
 pub mod error;

@@ -1,8 +1,10 @@
 use rust_and_vulkan::automation::AutomationFileLoader;
+use rust_and_vulkan::beacon_dashboard::BeaconDashboard;
 use rust_and_vulkan::ecss_automation::{ExecutionEvent, ExecutionStats};
 use rust_and_vulkan::{EguiManager, EguiRenderer};
 use rust_and_vulkan::{ProgramConfig, ProgramRunner, RuntimeConfig};
 use rust_and_vulkan::{SdlContext, SdlWindow, VulkanDevice, VulkanInstance, VulkanSurface};
+use rust_and_vulkan::YamcsConfig;
 
 use rust_and_vulkan::simple::{
     Buffer, BufferUsage, CommandBuffer, DescriptorPool, DescriptorSet, DescriptorSetLayout, Format,
@@ -304,6 +306,16 @@ fn main() -> Result<(), String> {
     let mut prg_use_conda_env = false;
     let mut prg_conda_env_name = String::new();
 
+    // BEACON telemetry dashboard state
+    let mut beacon_show_window = false;
+    let mut beacon_dashboard = BeaconDashboard::default();
+    // Yamcs connection fields for the BEACON dashboard (user editable in UI)
+    let mut beacon_yamcs_url = "http://localhost:8090".to_string();
+    let mut beacon_yamcs_instance = "myproject".to_string();
+    let mut beacon_yamcs_processor = "realtime".to_string();
+    let mut beacon_yamcs_username = String::new();
+    let mut beacon_yamcs_password = String::new();
+
     // Event + render loop
     let mut quit = false;
     let mut window_resized = false;
@@ -487,7 +499,80 @@ fn main() -> Result<(), String> {
                 .vscroll(true)
                 .show(&egui_manager.ctx, |ui| {
                     ui.label(egui::RichText::new(refresh_label.as_str()));
+                    ui.separator();
+                    if ui.button("📡 BEACON Telemetry").clicked() {
+                        beacon_show_window = !beacon_show_window;
+                    }
                 });
+
+            if beacon_show_window {
+                egui::Window::new("BEACON Telemetry Dashboard")
+                    .open(&mut beacon_show_window)
+                    .default_width(760.0)
+                    .default_height(620.0)
+                    .resizable(true)
+                    .vscroll(true)
+                    .show(&egui_manager.ctx, |ui| {
+                        // ── Connection config ────────────────────────────
+                        egui::CollapsingHeader::new("Yamcs Connection")
+                            .default_open(!beacon_dashboard.running)
+                            .show(ui, |ui| {
+                                egui::Grid::new("beacon_yamcs_grid")
+                                    .num_columns(2)
+                                    .spacing([8.0, 4.0])
+                                    .show(ui, |ui| {
+                                        ui.label("Base URL:");
+                                        ui.text_edit_singleline(&mut beacon_yamcs_url);
+                                        ui.end_row();
+                                        ui.label("Instance:");
+                                        ui.text_edit_singleline(&mut beacon_yamcs_instance);
+                                        ui.end_row();
+                                        ui.label("Processor:");
+                                        ui.text_edit_singleline(&mut beacon_yamcs_processor);
+                                        ui.end_row();
+                                        ui.label("Username:");
+                                        ui.text_edit_singleline(&mut beacon_yamcs_username);
+                                        ui.end_row();
+                                        ui.label("Password:");
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut beacon_yamcs_password)
+                                                .password(true),
+                                        );
+                                        ui.end_row();
+                                    });
+
+                                ui.separator();
+                                let btn_label = if beacon_dashboard.running {
+                                    "🔄 Restart Poller"
+                                } else {
+                                    "▶ Start Polling"
+                                };
+                                if ui.button(btn_label).clicked() {
+                                    // Build a fresh config from the form fields.
+                                    let cfg = YamcsConfig {
+                                        base_url: beacon_yamcs_url.trim().to_string(),
+                                        instance: beacon_yamcs_instance.trim().to_string(),
+                                        processor: beacon_yamcs_processor.trim().to_string(),
+                                        username: beacon_yamcs_username.trim().to_string(),
+                                        password: beacon_yamcs_password.clone(),
+                                        origin: "AutomationWare".to_string(),
+                                    };
+                                    // Reset and restart poller.
+                                    beacon_dashboard.running = false;
+                                    beacon_dashboard.rx = None;
+                                    beacon_dashboard.start_poller(cfg);
+                                }
+                                if ui.button("🗑 Clear history").clicked() {
+                                    beacon_dashboard.history.snapshots.clear();
+                                }
+                            });
+
+                        ui.separator();
+
+                        // ── Dashboard plots ──────────────────────────────
+                        beacon_dashboard.render(ui);
+                    });
+            }
 
             if commander_show_window {
                 egui::Window::new("Commander UDP")
@@ -1401,6 +1486,26 @@ fn main() -> Result<(), String> {
         // Submit + present
         if let Err(e) = swapchain.end_frame(&context) {
             eprintln!("end_frame failed: {e:?}");
+            // On OUT_OF_DATE or SUBOPTIMAL (both surface as "out of date" message), recreate.
+            if matches!(e, rust_and_vulkan::simple::Error::Vulkan(ref msg) if msg.contains("out of date"))
+            {
+                let mut width = 0i32;
+                let mut height = 0i32;
+                unsafe {
+                    rust_and_vulkan::SDL_GetWindowSizeInPixels(
+                        window.window,
+                        &mut width,
+                        &mut height,
+                    );
+                }
+                if width > 0 && height > 0 {
+                    if let Err(e) =
+                        swapchain.recreate(&context, surface_khr, width as u32, height as u32)
+                    {
+                        eprintln!("Failed to recreate swapchain after end_frame: {e:?}");
+                    }
+                }
+            }
         }
     }
     // Ensure device idle before drop order tears things down.

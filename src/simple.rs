@@ -2705,7 +2705,6 @@ impl Default for RasterizationState {
 }
 
 impl RasterizationState {
-
     pub fn with_cull_mode(mut self, cull_mode: u32) -> Self {
         self.cull_mode = cull_mode;
         self
@@ -4228,12 +4227,26 @@ impl Swapchain {
             }
             present_modes.set_len(present_mode_count as usize);
 
-            // Prefer FIFO (V-Sync) if available, otherwise MAILBOX
-            Ok(present_modes
+            // Prefer MAILBOX (low-latency triple-buffering, no tearing) for best performance.
+            // Fall back through IMMEDIATE (uncapped, may tear) → FIFO_RELAXED → FIFO (guaranteed).
+            // FIFO is V-Sync locked and causes CPU stalls on NVIDIA/Windows drivers, so it is
+            // only used as a last resort.
+            let preferred = [
+                crate::VkPresentModeKHR::VK_PRESENT_MODE_MAILBOX_KHR,
+                crate::VkPresentModeKHR::VK_PRESENT_MODE_IMMEDIATE_KHR,
+                crate::VkPresentModeKHR::VK_PRESENT_MODE_FIFO_RELAXED_KHR,
+                crate::VkPresentModeKHR::VK_PRESENT_MODE_FIFO_KHR,
+            ];
+            let chosen = preferred
                 .iter()
-                .find(|&&m| m == crate::VkPresentModeKHR::VK_PRESENT_MODE_FIFO_KHR)
+                .find(|&&p| present_modes.contains(&p))
                 .copied()
-                .unwrap_or(crate::VkPresentModeKHR::VK_PRESENT_MODE_MAILBOX_KHR))
+                .unwrap_or(crate::VkPresentModeKHR::VK_PRESENT_MODE_FIFO_KHR);
+            eprintln!(
+                "Present mode selected: {:?} (available: {:?})",
+                chosen, present_modes
+            );
+            Ok(chosen)
         }
     }
 
@@ -4843,8 +4856,12 @@ impl Swapchain {
                 &mut image_index,
             );
             match result {
-                crate::VkResult::VK_SUCCESS | crate::VkResult::VK_SUBOPTIMAL_KHR => Ok(image_index),
-                crate::VkResult::VK_ERROR_OUT_OF_DATE_KHR => {
+                crate::VkResult::VK_SUCCESS => Ok(image_index),
+                // VK_SUBOPTIMAL_KHR: image acquired but swapchain no longer matches surface
+                // exactly. Treat as out-of-date so the caller recreates the swapchain.
+                // On NVIDIA/Windows this is common after window focus changes and causes
+                // flickering if ignored.
+                crate::VkResult::VK_SUBOPTIMAL_KHR | crate::VkResult::VK_ERROR_OUT_OF_DATE_KHR => {
                     // Caller should recreate the swapchain
                     Err(Error::Vulkan("Swapchain out of date".to_string()))
                 }
@@ -4876,8 +4893,9 @@ impl Swapchain {
 
             let result = crate::vkQueuePresentKHR(self.present_queue, &present_info);
             match result {
-                crate::VkResult::VK_SUCCESS | crate::VkResult::VK_SUBOPTIMAL_KHR => Ok(()),
-                crate::VkResult::VK_ERROR_OUT_OF_DATE_KHR => {
+                crate::VkResult::VK_SUCCESS => Ok(()),
+                // Treat SUBOPTIMAL the same as OUT_OF_DATE so the caller recreates the swapchain.
+                crate::VkResult::VK_SUBOPTIMAL_KHR | crate::VkResult::VK_ERROR_OUT_OF_DATE_KHR => {
                     // Caller should recreate the swapchain
                     Err(Error::Vulkan("Swapchain out of date".to_string()))
                 }
@@ -4917,8 +4935,9 @@ impl Swapchain {
 
             let result = crate::vkQueuePresentKHR(self.present_queue, &present_info);
             match result {
-                crate::VkResult::VK_SUCCESS | crate::VkResult::VK_SUBOPTIMAL_KHR => Ok(()),
-                crate::VkResult::VK_ERROR_OUT_OF_DATE_KHR => {
+                crate::VkResult::VK_SUCCESS => Ok(()),
+                // Treat SUBOPTIMAL the same as OUT_OF_DATE so the caller recreates the swapchain.
+                crate::VkResult::VK_SUBOPTIMAL_KHR | crate::VkResult::VK_ERROR_OUT_OF_DATE_KHR => {
                     // Caller should recreate the swapchain
                     Err(Error::Vulkan("Swapchain out of date".to_string()))
                 }
