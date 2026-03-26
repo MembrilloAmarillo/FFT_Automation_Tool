@@ -249,13 +249,14 @@ impl YamcsClient {
         )
     }
 
-    fn packets_by_name_url(&self, packet_name: &str, limit: usize) -> String {
+    fn packets_by_name_url(&self, packet_name: &str, gentime: &str, seqnum: usize) -> String {
         format!(
-            "{}/api/archive/{}/packets?order=desc&limit={}&name={}",
+            "{}/api/archive/{}/packets/{}/{}/{}:extract",
             self.cfg.base_url.trim_end_matches('/'),
             self.cfg.instance,
-            limit,
-            packet_name
+            packet_name,
+            gentime,
+            seqnum
         )
     }
 
@@ -559,10 +560,73 @@ impl YamcsClient {
         Ok(res.json().await?)
     }
 
-    pub async fn recent_packets_by_name(&self, packet_name: &str, limit: usize) -> Result<Value> {
+    pub async fn list_packages(&self) -> Result<Value> {
         let res = self
             .http
-            .get(self.packets_by_name_url(packet_name, limit))
+            .get(format!(
+                "{}/api/archive/{}/packets",
+                self.cfg.base_url.trim_end_matches('/'),
+                self.cfg.instance
+            ))
+            .basic_auth(&self.cfg.username, Some(&self.cfg.password))
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Ok(res.json().await?)
+    }
+
+    pub async fn recent_packets_by_name(&self, packet_name: &str, limit: usize) -> Result<Value> {
+        let packages = self.list_packages().await?;
+
+        let mut gen_time: &str = "";
+        let mut seq_num: usize = 0;
+        let mut full_packet_name = packet_name;
+
+        for pkg in packages
+            .get("packet")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| YamcsTcError::Verification("missing packet array in packages".into()))?
+        {
+            // check if the packet name matches the one we're looking for, and if so print the whole package for debugging
+            // the part to check is the last keyword after the path, e.g. for /UCF/PUS/PUS_1_1 it would be PUS_1_1
+            //
+            if let Some(name) = pkg
+                .get("id")
+                .and_then(|id| id.get("name"))
+                .and_then(|n| n.as_str())
+            {
+                if name.rsplit('/').next() == Some(packet_name) {
+                    full_packet_name = name;
+                    eprintln!("Found package for '{}': {:#}", packet_name, pkg);
+                    gen_time = pkg
+                        .get("generationTime")
+                        .and_then(|gt| gt.as_str())
+                        .ok_or_else(|| {
+                            YamcsTcError::Verification(format!(
+                                "missing generationTime for packet '{}'",
+                                packet_name
+                            ))
+                        })?;
+                    seq_num = pkg
+                        .get("sequenceNumber")
+                        .and_then(|sn| sn.as_u64())
+                        .ok_or_else(|| {
+                            YamcsTcError::Verification(format!(
+                                "missing sequenceNumber for packet '{}'",
+                                packet_name
+                            ))
+                        })? as usize;
+                    break;
+                }
+            }
+        }
+
+        let encoded_full_packet_name = full_packet_name.to_string().replace("/", "%2F");
+
+        let res = self
+            .http
+            .get(self.packets_by_name_url(encoded_full_packet_name.as_str(), gen_time, seq_num))
             .basic_auth(&self.cfg.username, Some(&self.cfg.password))
             .send()
             .await?

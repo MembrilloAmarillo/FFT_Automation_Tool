@@ -172,6 +172,47 @@ fn is_commander_command(name: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryExpectation {
+    pub packet_name: String,
+
+    #[serde(default)]
+    pub packet_name_exact: bool,
+
+    #[serde(default = "default_verify_timeout_ms")]
+    pub timeout_ms: u64,
+
+    #[serde(default = "default_verify_poll_interval_ms")]
+    pub poll_interval_ms: u64,
+
+    #[serde(default = "default_verify_packet_limit")]
+    pub packet_limit: usize,
+
+    #[serde(default)]
+    pub checks: Vec<TelemetryCheck>,
+}
+
+fn default_verify_timeout_ms() -> u64 {
+    5_000
+}
+
+fn default_verify_poll_interval_ms() -> u64 {
+    500
+}
+
+fn default_verify_packet_limit() -> usize {
+    10
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryCheck {
+    pub name: String,
+    #[serde(default)]
+    pub equals: Option<Value>,
+    #[serde(default)]
+    pub contains: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandDefinition {
     pub name: String,
     #[serde(default = "default_args")]
@@ -196,6 +237,8 @@ pub struct CommandDefinition {
     pub verify_packet_limit: usize,
     #[serde(default)]
     pub dry_run_first: bool,
+    #[serde(default)]
+    pub telemetry: Option<TelemetryExpectation>,
 }
 
 impl CommandDefinition {
@@ -213,6 +256,7 @@ impl CommandDefinition {
             verify_poll_interval_ms: 500,
             verify_packet_limit: 10,
             dry_run_first: false,
+            telemetry: None,
         }
     }
 

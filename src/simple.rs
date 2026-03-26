@@ -321,10 +321,15 @@ pub struct GraphicsContext {
     memory_properties: crate::VkPhysicalDeviceMemoryProperties,
     has_uma: bool,
     descriptor_buffer_supported: bool,
+    swapchain_maintenance1_supported: bool,
 }
 
 impl GraphicsContext {
-    /// Create a new graphics context from existing Vulkan and SDL objects
+    /// Create a new graphics context from existing Vulkan and SDL objects.
+    ///
+    /// Wraps raw Vulkan handles into a higher-level context that manages memory allocation,
+    /// command submission, and resource creation. Call [`VulkanDevice::graphics_context`] for
+    /// the typical construction path.
     pub fn new(
         instance: crate::VkInstance,
         physical_device: crate::VkPhysicalDevice,
@@ -333,6 +338,7 @@ impl GraphicsContext {
         present_queue: crate::VkQueue,
         command_pool: crate::VkCommandPool,
         descriptor_buffer_supported: bool,
+        swapchain_maintenance1_supported: bool,
     ) -> Result<Self> {
         unsafe {
             let mut memory_properties = std::mem::zeroed();
@@ -363,6 +369,7 @@ impl GraphicsContext {
                 memory_properties,
                 has_uma,
                 descriptor_buffer_supported,
+                swapchain_maintenance1_supported,
             })
         }
     }
@@ -373,8 +380,15 @@ impl GraphicsContext {
         self.has_uma
     }
 
+    /// Returns true if VK_EXT_descriptor_buffer is available on this device.
     pub fn descriptor_buffer_supported(&self) -> bool {
         self.descriptor_buffer_supported
+    }
+
+    /// Returns true if VK_KHR_swapchain_maintenance1 is available on this device.
+    /// When true, the swapchain can use present-fences instead of per-image semaphores.
+    pub fn swapchain_maintenance1_supported(&self) -> bool {
+        self.swapchain_maintenance1_supported
     }
 
     /// Return the raw Vulkan device handle.
@@ -1259,8 +1273,6 @@ impl GpuBumpAllocator {
     }
 }
 
-// More functionality can be added here (textures, buffers, pipelines, etc.)
-
 /// A GPU buffer with bound memory
 pub struct Buffer {
     buffer: crate::VkBuffer,
@@ -1852,6 +1864,7 @@ impl RootArguments {
 pub struct PipelineLayout {
     layout: crate::VkPipelineLayout,
     device: crate::VkDevice,
+    // Descriptor set layout handles must outlive the pipeline layout (RAII).
     #[allow(dead_code)]
     set_layouts: Vec<crate::VkDescriptorSetLayout>,
     push_constant_range: Option<crate::VkPushConstantRange>,
@@ -2610,8 +2623,9 @@ impl TextureDescriptorHeap {
             // Store the image view for later destruction
             self.image_views[index as usize] = image_view;
 
-            println!(
-                "✓ Texture descriptor written at index {} (offset: 0x{:x}, size: {} bytes)",
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "Texture descriptor written at index {} (offset: 0x{:x}, size: {} bytes)",
                 index, offset, self.descriptor_size
             );
 
@@ -2674,9 +2688,9 @@ pub struct RasterizationState {
     pub line_width: f32,
 }
 
-impl RasterizationState {
-    /// Create default rasterization state (fill mode, back-face cull)
-    pub fn default() -> Self {
+impl Default for RasterizationState {
+    /// Fill mode, back-face cull, clockwise front face, no depth bias, 1px line width.
+    fn default() -> Self {
         Self {
             polygon_mode: crate::VkPolygonMode::VK_POLYGON_MODE_FILL,
             cull_mode: crate::VkCullModeFlagBits::VK_CULL_MODE_BACK_BIT as u32,
@@ -2688,6 +2702,9 @@ impl RasterizationState {
             line_width: 1.0,
         }
     }
+}
+
+impl RasterizationState {
 
     pub fn with_cull_mode(mut self, cull_mode: u32) -> Self {
         self.cull_mode = cull_mode;
@@ -2714,9 +2731,9 @@ pub struct DepthStencilState {
     pub stencil_test_enable: bool,
 }
 
-impl DepthStencilState {
-    /// Create default depth stencil state (depth test enabled, less comparison)
-    pub fn default() -> Self {
+impl Default for DepthStencilState {
+    /// Depth test and write enabled, less-than comparison, stencil disabled.
+    fn default() -> Self {
         Self {
             depth_test_enable: true,
             depth_write_enable: true,
@@ -2724,7 +2741,9 @@ impl DepthStencilState {
             stencil_test_enable: false,
         }
     }
+}
 
+impl DepthStencilState {
     pub fn with_depth_test(mut self, enable: bool) -> Self {
         self.depth_test_enable = enable;
         self.depth_write_enable = enable;
@@ -2984,7 +3003,7 @@ impl GraphicsPipeline {
     }
 
     /// Create a simple graphics pipeline for rendering triangles (traditional descriptor sets).
-    /// Deprecated: Use `builder()` instead for better flexibility.
+    #[deprecated(note = "Use GraphicsPipeline::builder() instead")]
     pub fn new(
         context: &GraphicsContext,
         vertex_shader: &ShaderModule,
@@ -3003,7 +3022,7 @@ impl GraphicsPipeline {
     }
 
     /// Create a graphics pipeline that is compatible with VK_EXT_descriptor_buffer.
-    /// Deprecated: Use `builder().with_descriptor_buffer()` instead.
+    #[deprecated(note = "Use GraphicsPipeline::builder().with_descriptor_buffer() instead")]
     pub fn new_descriptor_buffer(
         context: &GraphicsContext,
         vertex_shader: &ShaderModule,
@@ -3027,7 +3046,7 @@ impl GraphicsPipeline {
 
     /// Create a graphics pipeline with alpha blending enabled (src_alpha / one_minus_src_alpha).
     /// Suitable for UI overlays such as egui.
-    /// Deprecated: Use `builder().with_blending()` instead.
+    #[deprecated(note = "Use GraphicsPipeline::builder().with_blending() instead")]
     pub fn new_with_blend(
         context: &GraphicsContext,
         vertex_shader: &ShaderModule,
@@ -3048,7 +3067,9 @@ impl GraphicsPipeline {
     /// Create a graphics pipeline with alpha blending AND the descriptor-buffer flag.
     /// Use this when rendering with blending in a frame that also uses
     /// `VK_EXT_descriptor_buffer` (e.g. egui rendered after a descriptor-buffer scene pass).
-    /// Deprecated: Use `builder().with_blending().with_descriptor_buffer()` instead.
+    #[deprecated(
+        note = "Use GraphicsPipeline::builder().with_blending().with_descriptor_buffer() instead"
+    )]
     pub fn new_with_blend_descriptor_buffer(
         context: &GraphicsContext,
         vertex_shader: &ShaderModule,
@@ -3861,21 +3882,34 @@ impl CommandBuffer {
         }
     }
 
-    /// Bind descriptor sets for graphics pipeline
+    /// Bind descriptor sets for the graphics pipeline.
+    ///
+    /// Uses a stack-allocated array to avoid heap allocation on every call (typically 1-2 sets).
+    /// Panics if more than 8 descriptor sets are passed.
     pub fn bind_descriptor_sets(
         &self,
         layout: &PipelineLayout,
         first_set: u32,
         sets: &[&DescriptorSet],
     ) {
+        const MAX_SETS: usize = 8;
+        assert!(
+            sets.len() <= MAX_SETS,
+            "bind_descriptor_sets: too many sets ({}), max is {}",
+            sets.len(),
+            MAX_SETS
+        );
+        let mut vk_sets = [std::ptr::null_mut(); MAX_SETS];
+        for (i, s) in sets.iter().enumerate() {
+            vk_sets[i] = s.vk_set();
+        }
         unsafe {
-            let vk_sets: Vec<crate::VkDescriptorSet> = sets.iter().map(|s| s.vk_set()).collect();
             crate::vkCmdBindDescriptorSets(
                 self.buffer,
                 crate::VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS,
                 layout.vk_layout(),
                 first_set,
-                vk_sets.len() as u32,
+                sets.len() as u32,
                 vk_sets.as_ptr(),
                 0,
                 std::ptr::null(),
@@ -4056,12 +4090,14 @@ impl CommandBuffer {
 /// Swapchain for presentation
 pub struct Swapchain {
     swapchain: crate::VkSwapchainKHR,
+    // Swapchain images are owned by the swapchain; stored here to keep handles valid (RAII).
     #[allow(dead_code)]
     images: Vec<crate::VkImage>,
     image_views: Vec<crate::VkImageView>,
     depth_image: crate::VkImage,
     depth_image_view: crate::VkImageView,
     depth_memory: crate::VkDeviceMemory,
+    // Retained for potential future use in resize logic.
     #[allow(dead_code)]
     depth_format: crate::VkFormat,
     render_pass: crate::VkRenderPass,
@@ -4069,8 +4105,6 @@ pub struct Swapchain {
     format: crate::VkFormat,
     extent: crate::VkExtent2D,
     device: crate::VkDevice,
-    #[allow(dead_code)]
-    graphics_queue: crate::VkQueue,
     present_queue: crate::VkQueue,
     // Per-swapchain-image semaphores signaled when rendering finishes for that image.
     // Using one semaphore per swapchain image prevents reusing a signal semaphore
@@ -4194,7 +4228,7 @@ impl Swapchain {
             }
             present_modes.set_len(present_mode_count as usize);
 
-            // Prefer MAILBOX (triple buffering) if available, otherwise FIFO
+            // Prefer FIFO (V-Sync) if available, otherwise MAILBOX
             Ok(present_modes
                 .iter()
                 .find(|&&m| m == crate::VkPresentModeKHR::VK_PRESENT_MODE_FIFO_KHR)
@@ -4671,41 +4705,9 @@ impl Swapchain {
                 framebuffers.push(framebuffer);
             }
 
-            // Detect VK_KHR_swapchain_maintenance1 support on the device.
-            // If supported we can use a present-fence path and avoid allocating per-image semaphores.
-            let mut ext_count: u32 = 0;
-            let mut support_swapchain_maintenance1 = false;
-            {
-                let mut result = crate::vkEnumerateDeviceExtensionProperties(
-                    context.physical_device,
-                    std::ptr::null(),
-                    &mut ext_count,
-                    std::ptr::null_mut(),
-                );
-                if result == crate::VkResult::VK_SUCCESS && ext_count > 0 {
-                    let mut exts: Vec<crate::VkExtensionProperties> =
-                        Vec::with_capacity(ext_count as usize);
-                    result = crate::vkEnumerateDeviceExtensionProperties(
-                        context.physical_device,
-                        std::ptr::null(),
-                        &mut ext_count,
-                        exts.as_mut_ptr(),
-                    );
-                    if result == crate::VkResult::VK_SUCCESS {
-                        exts.set_len(ext_count as usize);
-                        for ext in &exts {
-                            // extensionName is a C string buffer; convert it to Rust &str safely.
-                            let name_ptr = ext.extensionName.as_ptr() as *const i8;
-                            if let Ok(name) = std::ffi::CStr::from_ptr(name_ptr).to_str() {
-                                if name == "VK_KHR_swapchain_maintenance1" {
-                                    support_swapchain_maintenance1 = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            // Use the pre-detected capability from GraphicsContext instead of
+            // re-enumerating device extensions here.
+            let support_swapchain_maintenance1 = context.swapchain_maintenance1_supported();
             // Create per-image render-finished semaphores only if the maintenance1 extension
             // is not available. When maintenance1 is available we will use present-fence.
             let mut image_render_finished_semaphores: Vec<crate::VkSemaphore> =
@@ -4742,7 +4744,6 @@ impl Swapchain {
                 format,
                 extent,
                 device: context.device,
-                graphics_queue: context.graphics_queue,
                 present_queue: context.present_queue,
                 // Whether the maintenance1 present-fence path is available on this device
                 support_swapchain_maintenance1,
@@ -4983,20 +4984,23 @@ impl Swapchain {
             self.acquire_next_image(current_frame.image_available_semaphore)?;
         let acquire_ms = acquire_start.elapsed().as_secs_f64() * 1000.0;
 
-        let slow_sync = wait_ms > 2.0 || acquire_ms > 20.0;
-        if slow_sync {
-            self.slow_sync_log_counter = self.slow_sync_log_counter.wrapping_add(1);
-            // Print immediately on first slow frame, then every 60 consecutive slow frames.
-            // if self.slow_sync_log_counter == 1 || self.slow_sync_log_counter % 60 == 0 {
-            //     eprintln!(
-            //         "Frame sync wait (sampled): fence={wait_ms:.2} ms, acquire={acquire_ms:.2} ms, frame_slot={}, image_index={}, streak={}",
-            //         self.current_frame_index,
-            //         self.current_image_index,
-            //         self.slow_sync_log_counter,
-            //     );
-            // }
-        } else {
-            self.slow_sync_log_counter = 0;
+        #[cfg(debug_assertions)]
+        {
+            let slow_sync = wait_ms > 2.0 || acquire_ms > 20.0;
+            if slow_sync {
+                self.slow_sync_log_counter = self.slow_sync_log_counter.wrapping_add(1);
+                // Rate-limit: first slow frame, then every 60 consecutive slow frames.
+                if self.slow_sync_log_counter == 1 || self.slow_sync_log_counter % 60 == 0 {
+                    eprintln!(
+                        "Frame sync wait (sampled): fence={wait_ms:.2} ms, acquire={acquire_ms:.2} ms, frame_slot={}, image_index={}, streak={}",
+                        self.current_frame_index,
+                        self.current_image_index,
+                        self.slow_sync_log_counter,
+                    );
+                }
+            } else {
+                self.slow_sync_log_counter = 0;
+            }
         }
 
         // Reset command buffer for reuse
@@ -5098,7 +5102,6 @@ pub struct FrameData {
     pub command_buffer: CommandBuffer,
     pub fence: Fence,
     pub image_available_semaphore: crate::VkSemaphore,
-    pub render_finished_semaphore: crate::VkSemaphore,
     device: crate::VkDevice,
 }
 
@@ -5109,7 +5112,6 @@ impl FrameData {
             command_buffer: CommandBuffer::allocate(context)?,
             fence: Fence::create(context)?,
             image_available_semaphore: context.create_semaphore()?,
-            render_finished_semaphore: context.create_semaphore()?,
             device: context.device,
         })
     }
@@ -5155,11 +5157,6 @@ impl Drop for FrameData {
             crate::vkDestroySemaphore(
                 self.device,
                 self.image_available_semaphore,
-                std::ptr::null(),
-            );
-            crate::vkDestroySemaphore(
-                self.device,
-                self.render_finished_semaphore,
                 std::ptr::null(),
             );
         }

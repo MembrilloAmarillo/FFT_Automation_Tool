@@ -27,6 +27,13 @@ description = "System alive check"
 delay_ms = 500
 retry_count = 1
 
+[commands.telemetry]
+packet_name = "PUS_17_2"
+packet_name_exact = false
+timeout_ms = 5000
+poll_interval_ms = 250
+packet_limit = 10
+
 [[commands]]
 name = "PUS_3_31"
 description = "Set HK collection intervals for EPS and ADCS"

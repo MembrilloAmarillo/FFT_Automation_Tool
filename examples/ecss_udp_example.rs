@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rust_and_vulkan::{
-    AutomationConfig, AutomationEngine, CommandDefinition, Commands, HkStructureId, Pus331Entry,
-    YamcsClient, YamcsConfig,
+    AutomationConfig, AutomationEngine, CommandDefinition, CommanderUdpConfig, Commands,
+    HkStructureId, Pus331Entry, YamcsClient, YamcsConfig,
 };
 use serde_json::json;
 
@@ -104,11 +104,15 @@ async fn example_are_you_alive() -> Result<()> {
 async fn example_eps_channel_on() -> Result<()> {
     println!("=== EPS Output Bus Channel ON ===");
     let client = YamcsClient::new(make_config())?;
-    let channel_id: u8 = 3;
+    let channel_id: u8 = 6;
     let cmd = Commands::pus_8_1_eps_output_bus_channel_on(channel_id);
     println!("Sending: {} with args: {}", cmd.name, cmd.args);
     let response = client.issue_command_value(&cmd.name, cmd.args).await?;
+
+    let packet_response = client.recent_packets_by_name("PUS_1_7", 1000).await?;
     println!("Response: {:#}", response);
+    println!("Recent PUS_1_7 packets: {:#?}", packet_response);
+
     Ok(())
 }
 
@@ -301,8 +305,9 @@ async fn example_automation_code() -> Result<()> {
     let hk_query = Commands::pus_3_33(vec![HkStructureId::EpsSys, HkStructureId::Transceiver])?;
 
     let plan = AutomationConfig {
-        yamcs: cfg,
+        yamcs: Some(cfg),
         timeout_ms: 30_000,
+        commander_udp: CommanderUdpConfig::default(), // Use default UDP config (localhost:9000)
         stop_on_error: true,
         repeat_count: 1,
         dry_run_all_first: false,

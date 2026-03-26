@@ -190,6 +190,7 @@ fn main() -> Result<(), String> {
         device.present_queue,
         device.command_pool,
         device.descriptor_buffer_supported,
+        device.swapchain_maintenance1_supported,
     )
     .map_err(|e| e.to_string())?;
 

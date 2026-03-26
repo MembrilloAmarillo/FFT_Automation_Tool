@@ -52,6 +52,7 @@ struct DeviceCapabilities {
     descriptor_buffer_capture_replay: bool,
     descriptor_buffer_image_layout_ignored: bool,
     descriptor_indexing_supported: bool,
+    swapchain_maintenance1_supported: bool,
 }
 
 fn env_var_is_truthy(name: &str) -> bool {
@@ -256,6 +257,44 @@ impl Drop for SdlContext {
     fn drop(&mut self) {
         unsafe {
             SDL_Quit();
+        }
+    }
+}
+
+fn get_sdl_error() -> String {
+    unsafe {
+        let error = SDL_GetError();
+        std::ffi::CStr::from_ptr(error)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+pub struct SdlWindow {
+    pub window: *mut SDL_Window,
+}
+
+impl SdlWindow {
+    pub fn new(title: &str, width: i32, height: i32) -> std::result::Result<Self, String> {
+        unsafe {
+            let window = SDL_CreateWindow(
+                title.as_ptr() as *const c_char,
+                width,
+                height,
+                SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY,
+            );
+            if window.is_null() {
+                return Err(format!("SDL_CreateWindow failed: {}", get_sdl_error()));
+            }
+            Ok(SdlWindow { window })
+        }
+    }
+}
+
+impl Drop for SdlWindow {
+    fn drop(&mut self) {
+        unsafe {
+            SDL_DestroyWindow(self.window);
         }
     }
 }
@@ -496,6 +535,7 @@ pub struct VulkanDevice {
     pub command_pool: crate::VkCommandPool,
     pub instance: VulkanInstance,
     pub descriptor_buffer_supported: bool,
+    pub swapchain_maintenance1_supported: bool,
 }
 
 impl VulkanDevice {
@@ -761,11 +801,14 @@ impl VulkanDevice {
                 && descriptor_buffer_features_query.descriptorBufferCaptureReplay != 0;
             let descriptor_buffer_image_layout_ignored = descriptor_buffer_supported
                 && descriptor_buffer_features_query.descriptorBufferImageLayoutIgnored != 0;
+            let swapchain_maintenance1_supported =
+                has_device_extension("VK_KHR_swapchain_maintenance1");
             let capabilities = DeviceCapabilities {
                 descriptor_buffer_supported,
                 descriptor_buffer_capture_replay,
                 descriptor_buffer_image_layout_ignored,
                 descriptor_indexing_supported,
+                swapchain_maintenance1_supported,
             };
 
             // Create logical device
@@ -936,6 +979,7 @@ impl VulkanDevice {
                 command_pool,
                 instance,
                 descriptor_buffer_supported: capabilities.descriptor_buffer_supported,
+                swapchain_maintenance1_supported: capabilities.swapchain_maintenance1_supported,
             })
         }
     }
@@ -949,6 +993,7 @@ impl VulkanDevice {
             self.present_queue,
             self.command_pool,
             self.descriptor_buffer_supported,
+            self.swapchain_maintenance1_supported,
         )
     }
 }
@@ -962,40 +1007,3 @@ impl Drop for VulkanDevice {
     }
 }
 
-pub struct SdlWindow {
-    pub window: *mut SDL_Window,
-}
-
-impl SdlWindow {
-    pub fn new(title: &str, width: i32, height: i32) -> std::result::Result<Self, String> {
-        unsafe {
-            let window = SDL_CreateWindow(
-                title.as_ptr() as *const c_char,
-                width,
-                height,
-                SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY,
-            );
-            if window.is_null() {
-                return Err(format!("SDL_CreateWindow failed: {}", get_sdl_error()));
-            }
-            Ok(SdlWindow { window })
-        }
-    }
-}
-
-impl Drop for SdlWindow {
-    fn drop(&mut self) {
-        unsafe {
-            SDL_DestroyWindow(self.window);
-        }
-    }
-}
-
-fn get_sdl_error() -> String {
-    unsafe {
-        let error = SDL_GetError();
-        std::ffi::CStr::from_ptr(error)
-            .to_string_lossy()
-            .into_owned()
-    }
-}

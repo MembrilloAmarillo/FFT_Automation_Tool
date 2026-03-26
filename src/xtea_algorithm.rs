@@ -1,4 +1,7 @@
-pub fn xtea_encrypt(value: &[u32; 2], key: &[u32; 4]) -> [u32; 2] {
+const XTEA_KEY: [u32; 4] = [0xD4A7B29C, 0x5F8E31B6, 0xA2C94D73, 0x7BE1650F];
+
+pub fn xtea_encrypt(value: &[u32; 2]) -> [u32; 2] {
+    let key = XTEA_KEY;
     let mut v0 = value[0];
     let mut v1 = value[1];
     let delta: u32 = 0x9E3779B9;
@@ -21,7 +24,8 @@ pub fn xtea_encrypt(value: &[u32; 2], key: &[u32; 4]) -> [u32; 2] {
     [v0, v1]
 }
 
-pub fn xtea_decrypt(value: &[u32; 2], key: &[u32; 4]) -> [u32; 2] {
+pub fn xtea_decrypt(value: &[u32; 2]) -> [u32; 2] {
+    let key = XTEA_KEY;
     let mut v0 = value[0];
     let mut v1 = value[1];
     let delta: u32 = 0x9E3779B9;

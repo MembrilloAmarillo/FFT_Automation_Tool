@@ -1,7 +1,7 @@
 [application]
 app_name = "AutomationWare"
 app_version = "0.1.0"
-last_opened_unix = 1773851498
+last_opened_unix = 1774542529
 
 [[programs]]
 id = "yamcs"
@@ -10,7 +10,6 @@ command = "mvn"
 args = ["yamcs:run"]
 working_dir = "/home/polaris/devel/ucanfly_cubesat/OPS/MissionControlFrontend/YAMCS/"
 auto_start = false
-last_run_unix = 1773851486
 
 [programs.env]
 
@@ -30,15 +29,16 @@ auto_start = false
 
 [programs.runtime]
 kind = "conda_env"
-env_name = "activate"
+env_name = "base"
 
 [[programs]]
 id = "Frontend"
 name = "Mission Control Frontend"
 command = "npm"
 args = ["start"]
-working_dir = "/home/ucanfly/devel/ucanfly_cubesat/"
+working_dir = "/home/polaris/devel/ucanfly_cubesat/OPS/MissionControlFrontend/app/frontend/"
 auto_start = false
+last_run_unix = 1773922495
 
 [programs.env]
 
@@ -47,7 +47,7 @@ kind = "direct"
 
 [[programs]]
 id = "Backend"
-name = "Python Backend"
+name = "Mission Control Backend"
 command = "python"
 args = [
     "-m",
@@ -55,7 +55,7 @@ args = [
 ]
 working_dir = "/home/polaris/devel/ucanfly_cubesat/OPS/MissionControlFrontend/"
 auto_start = false
-last_run_unix = 1773851498
+last_run_unix = 1773922493
 
 [programs.env]
 
@@ -64,23 +64,21 @@ kind = "python_venv"
 venv_path = "/home/polaris/devel/ucanfly_cubesat/OPS/MissionControlFrontend/.venv"
 
 [[programs]]
-id = "Saschaware"
+id = "saschaware"
 name = "SaschaWare"
 command = "ucf_gs_csp"
 args = [
-    "--gui,",
-    "--udp-enable,",
-    "--set-rtable,",
+    "--gui",
+    "--udp-enable",
+    "--set-rtable",
     '"1/0',
-    "ZMQHUB,",
-    "5/0",
-    'ZMQHUB"',
+    'CAN"',
+    "--can-enable",
 ]
-working_dir = "/home/ucanfly/devel/ucanfly_cubesat/OPS/csp_client_gnu_radio/ucf_gs_csp/"
+working_dir = "/home/polaris/devel/ucanfly_cubesat/OPS/csp_client_gnu_radio/ucf_gs_csp"
 auto_start = false
 
 [programs.env]
 
 [programs.runtime]
-kind = "conda_env"
-env_name = "activate"
+kind = "direct"
